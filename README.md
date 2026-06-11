@@ -1,0 +1,236 @@
+# hush
+
+`.env` files sealed to your Mac's Secure Enclave. Secrets are encrypted into a
+`.hush` file, and reading them back — to run your app, print a value, or edit —
+always triggers the native macOS Touch ID / password prompt. `cat .hush`, a
+leaked backup, a stray `git add`, or a rogue script reading your home directory
+gets ciphertext only.
+
+## How it works
+
+- `hush init` generates **two P-256 keys inside the Secure Enclave** — one for
+  key agreement (decryption), one for signing (authenticity) — both with
+  `userPresence` access control baked in. The private keys physically cannot
+  leave the chip; what's stored in `~/.hush/identity.json` is an opaque blob
+  only *this Mac's* enclave can use — useless if exfiltrated.
+- `hush lock` encrypts with the **public** agreement key (ECIES: ephemeral
+  P-256 ECDH → HKDF-SHA256 → AES-256-GCM), then **signs** the result with the
+  enclave signing key — so the lock prompts once for your fingerprint.
+- Any decryption requires a key-agreement operation inside the enclave, and the
+  enclave refuses until macOS verifies user presence — Touch ID, Apple Watch,
+  or your account password. There is no CLI flag, no env var, no file
+  permission trick that bypasses it.
+- Before any decrypt prompt, hush **verifies the signature** with the public
+  key (no auth needed). A file that wasn't signed by this Mac's enclave — a
+  forgery, a tampered ciphertext, or a stripped signature — is rejected
+  outright and never reaches the prompt. Because *authoring* a valid file
+  requires your fingerprint, malware that can read your public key still can't
+  hand you secrets you'll trust.
+- Every `.hush` file is **bound to the directory it was locked in**. The bound
+  path is stored in the header for transparency, and it is mixed into both the
+  AES-GCM additional authenticated data and the signature — so hush refuses to
+  decrypt a copy that's been moved, and editing the header to fake the location
+  fails cryptographically. The auth prompt always names the bound path, and for
+  `hush run`, the exact command being launched — read it before you touch the
+  sensor.
+
+## Install
+
+```sh
+make install          # builds + ad-hoc signs + installs to ~/.local/bin
+```
+
+## Develop & test
+
+```sh
+make test             # unit tests (no Touch ID needed — 27 cases)
+make demo             # installs, then runs the non-interactive walkthrough
+```
+
+`make test` covers the logic that doesn't need the Secure Enclave: dotenv
+parsing, sealed-file serialization, the ECIES + AES-GCM round trip and its
+location-binding/signature guarantees (via a software stand-in key), decoy
+generation, the package-manager and MITM-on-delivery guards, fingerprinting,
+and secret scrubbing. The auth-gated paths (`lock`/`run`) are exercised by hand
+through `examples/web-app` — see its README.
+
+## Usage
+
+```sh
+hush init                     # one-time per Mac
+cd my-web-app
+hush lock --rm                # prompt → .env → signed .hush, shred the plaintext
+
+hush run -- npm run dev       # prompt → secrets injected as env vars → app runs
+hush show                     # prompt → print all secrets
+hush show DATABASE_URL        # prompt → print one value
+hush edit                     # prompt → $EDITOR → re-encrypted on save
+hush unlock                   # prompt → write plaintext .env back (escape hatch)
+hush rebind                   # prompt → re-authorize after moving a project
+hush decoy                    # write a fake .env wired to canary tokens
+hush log                      # show the access log (every decrypt attempt)
+hush doctor                   # audit: leftover plaintext, git leaks, exposure
+```
+
+Least-privilege and supply-chain guards on `run`:
+
+```sh
+hush run --only DB_URL -- node server.js   # inject just one var, not the whole set
+hush run -- npm install                    # BLOCKED — install scripts can scrape env
+hush run --allow-pkg -- npm install        # override if you really mean it
+```
+
+Moved a project? `hush` will refuse to decrypt at the new path until you run
+`hush rebind` there — the prompt for that explicitly shows
+`MOVE secrets bound to <old> → <new>` so a quiet relocation can't masquerade
+as normal use.
+
+`hush run` parses the decrypted dotenv content in memory, merges it into the
+environment, and `exec`s your command — the plaintext never touches disk.
+
+For multiple environments: `hush lock .env.production` produces
+`.env.production.hush`, then `hush run -f .env.production.hush -- ...`.
+
+## What this protects against — and what it doesn't
+
+Protects: plaintext secrets at rest. Accidental commits, cloud backups, other
+apps or scripts scanning your disk, copy-paste of project folders, stolen
+laptop (enclave key is unusable without your login).
+
+Does not protect: a running app's memory or environment (your process
+legitimately has the secrets once you approve), or an attacker who can sit and
+wait for you to approve a prompt. It turns "silently readable file" into
+"explicit, visible approval per access."
+
+### Known limitations — the particular issues to keep in mind
+
+These are the seams hush can *narrow* but not fully *close*. They're called out
+so you're not surprised:
+
+- **Approval-riding (confused deputy).** hush authorizes the *file*, not the
+  *caller*. Malware can invoke `hush show` and hope you reflexively approve the
+  prompt. hush surfaces the requesting parent process (`requested by zsh
+  [pid …]`) and the exact command/path so an unexpected request is visible — but
+  the last line of defense is reading the prompt before you authenticate.
+- **Key-pin tampering by same-user malware.** The Keychain fingerprint pin
+  catches a swapped public key in `identity.json`, but an attacker who *also*
+  rewrites the Keychain item defeats it. It's tamper-evident, not tamper-proof.
+- **The running app itself.** Once you approve, the secrets are in your process's
+  memory and environment; same-user code can read them, and the app can leak
+  them to logs or a crash reporter. `--watch` catches output leaks and `--only`
+  shrinks the blast radius, but silent in-memory reads or network exfiltration
+  have no local signal — the decoy/canary is the tripwire for that.
+- **Plaintext that already escaped** (old commits, backups, APFS snapshots) and
+  a **persistent root compromise** are out of scope for any userland tool —
+  rotation is the answer to the first, and nothing survives the second.
+
+## Hardening
+
+- `hush doctor` finds the leaks *around* the crypto: leftover plaintext files,
+  `.env` in git history or currently tracked, missing gitignore coverage,
+  sealed files whose location binding doesn't match where they sit, and a
+  tamperable install. Run it in any project you migrate. If plaintext ever
+  existed, rotating those secrets is the only complete fix — old copies may
+  live in backups and APFS snapshots forever.
+- The binary is signed with the hardened runtime (`-o runtime`), which blocks
+  `DYLD_INSERT_LIBRARIES`-style code injection into hush itself.
+- `hush init --biometry-only` uses `.biometryCurrentSet`: only a
+  currently-enrolled fingerprint can approve a decrypt — a keylogged account
+  password is useless, and changing fingerprint enrollment invalidates the key.
+  Trade-off: a broken sensor or clamshell-mode external keyboard means you
+  cannot decrypt at all; keep `hush unlock`'d copies of anything irreplaceable.
+- **Sealed files are signed**, so confidentiality comes with authenticity: an
+  attacker who reads your public key still can't forge a `.hush` you'll trust,
+  because signing requires your enclave key (and thus your fingerprint). This
+  closes the "substitution" attack where malware swaps in secrets pointing at
+  attacker-controlled infrastructure.
+- **`hush edit` works in a private 0700 temp directory** that's overwritten and
+  removed on exit — including any swap/backup files your editor drops next to
+  the file (`.swp`, `~`, `#...#`), so plaintext fragments don't linger in
+  shared `/tmp`. Note the overwrite is best-effort: on SSDs it does *not*
+  guarantee the old bytes are unrecoverable (wear-leveling / APFS
+  copy-on-write). FileVault and secret rotation are what you actually lean on.
+- **Honeytoken decoy** (`hush lock --decoy`, `hush decoy`): leaves a believable
+  fake `.env` where the real one was. The recent CVE-2025-55284 class of attack
+  is "prompt-inject an agent → it reads `.env` → exfiltrates it"; the npm/MCP
+  supply-chain scanners do the same from post-install scripts. A decoy turns
+  that read into a **tripwire** — wire its values to canary tokens
+  (`--dns`/`--url`/`--aws`, free at canarytokens.org) and their use or DNS
+  resolution alerts you that an exfiltration happened.
+- **Least-privilege injection** (`hush run --only K1,K2`): hand a process only
+  the secrets it needs, so a compromised dependency in that process tree can't
+  scrape the whole set.
+- **Package-manager guard**: `hush run -- npm/pip/... install` is refused by
+  default, because install scripts run untrusted code with every injected env
+  var in reach (the Shai-Hulud worm and the 2026 npm dependency-confusion
+  campaigns harvest exactly this way). Run installs without hush, or with
+  `--ignore-scripts`; override with `--allow-pkg`.
+- **Access log** (`hush log`, at `~/.hush/access.log`): every decrypt attempt —
+  approved, denied, forged, or guard-blocked — is recorded with a timestamp,
+  the command, and the directory. The Touch ID prompt prevents; the log detects
+  an access you didn't initiate. Secret *values* are scrubbed from every log
+  line and alert, so the telemetry can't itself become a leak.
+- **Exposure alerting**: the residual risk hush can't prevent is your *running*
+  app leaking its own secrets (into logs, stack traces, console output). `hush
+  run --watch` supervises the app and scans its stdout/stderr for the actual
+  secret values; the moment one appears it raises an alert and logs an
+  `EXPOSURE` event. `--redact` masks the value in-stream as well. A forged
+  `.hush` or an access from the wrong directory alerts too. Alerts go to macOS
+  Notification Center by default; set `HUSH_ALERT_WEBHOOK=<url>` for remote
+  (e.g. Slack) alerting, or `HUSH_NOTIFY=off` to silence popups.
+  Honest scope: `--watch` catches secrets that flow through the app's output —
+  not an attacker silently reading the process environment and exfiltrating over
+  the network. For that, the decoy/canary remains the tripwire.
+- **`hush doctor` deploy checks**: flags `.env`/`.hush` sitting in web-served
+  dirs (`public/`, `dist/`, `build/`, …), world-readable perms, and a
+  `Dockerfile` whose `.dockerignore` doesn't exclude `.env` — the
+  misconfigurations behind the mass `.env`-scanning campaigns (Bissa, the 2024
+  cloud-extortion wave, the Next.js/Vercel incidents).
+- **Man-in-the-middle on secret delivery**: `hush run` resolves the command to
+  a vetted absolute path *before* decrypting — it refuses a relative/cwd-local
+  command, a binary reached through a group/world-writable `PATH` directory, or
+  one another user can overwrite, and execs that exact path (no second `PATH`
+  lookup). This stops a malicious `./npm` or a writable-dir shim from receiving
+  the secrets right after your approval. Override a known-safe case with
+  `--allow-unsafe-path`.
+- **Approval-riding (confused-deputy)**: the auth prompt and the log name the
+  *parent process* that invoked hush (`requested by zsh [pid …]`), so a decrypt
+  triggered by an editor, an agent, or a stray script — rather than your shell
+  — is visible before you touch the sensor. Detectable, not preventable: no
+  userland tool can attest the caller, so read the prompt.
+- **MITM on your own key material**: `hush` pins a fingerprint of your public
+  keys in the macOS Keychain (a separate store from `identity.json`) and
+  verifies it on every load. A swapped public key — which would make your next
+  `hush lock` encrypt to an attacker's key — changes the fingerprint and is
+  refused with an alert. `hush fingerprint` shows it; `--repin` accepts a change
+  you made on purpose. (Tamper-evident, not tamper-proof: a same-user attacker
+  who also rewrites the Keychain item defeats it — but a file-only swap is
+  caught.)
+- **Verifiable identity for future sharing**: that same `hush fingerprint` is
+  the primitive a team feature would build on — teammates compare fingerprints
+  out-of-band (like an SSH key fingerprint or a Signal safety number) before
+  trusting each other's keys, which is what defeats a MITM on a key *exchange*.
+  Sharing itself (encrypting a file to multiple recipients) isn't built yet;
+  the verifiable-identity foundation is.
+- Against user-level malware replacing the binary:
+  `sudo make install PREFIX=/usr/local && sudo chown root:wheel /usr/local/bin/hush`.
+- Not fixable by hush or any userland tool: a persistent root compromise, your
+  app itself leaking its environment (logs, crash reporters), secrets that
+  already escaped in plaintext, or secrets read out of your *running* app's
+  memory/environment after you approve — rotation and least-privilege are the
+  answers there.
+
+## Notes
+
+- `.hush` files are machine-bound. Teammates each run `hush init` and lock
+  their own copy; the encrypted file is safe to commit but only useful to the
+  Mac that sealed it.
+- Re-running `hush init` after deleting `~/.hush/identity.json` makes all
+  existing `.hush` files permanently unreadable — `hush unlock` first.
+- Each decrypt = one prompt; `lock` prompts once (to sign); `edit` prompts
+  twice (decrypt to open, sign to save). macOS may satisfy `userPresence` with
+  Apple Watch approval if you have that enabled.
+- A v1 identity created before signing existed is upgraded automatically on
+  next use (a signing key is added — no auth needed for that), after which
+  locking begins to prompt. Existing v1 unsigned `.hush` files must be
+  re-locked once: `hush unlock` then `hush lock`.
