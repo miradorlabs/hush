@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Secure Enclave isn't available on hosted runners, so the auth-gated paths
+    # are exercised with software stand-in keys in `make test`. `make exploit`
+    # runs the guard/forgery cases that fail before any prompt; its planted-file
+    # cases auto-skip when no Enclave identity exists (i.e. on CI).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Confirm zero third-party dependencies
+        run: |
+          if [ -f Package.resolved ] && [ "$(jq '.pins | length' Package.resolved 2>/dev/null || echo 0)" != "0" ]; then
+            echo "::error::hush must have zero third-party dependencies"; exit 1
+          fi
+          echo "ok: no external dependencies"
+
+      - name: Unit + exploit tests
+        run: make test
+
+      - name: Build + ad-hoc sign
+        run: make build
+
+      - name: CLI exploit suite (pre-prompt refusals)
+        run: make exploit

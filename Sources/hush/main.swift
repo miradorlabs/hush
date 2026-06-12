@@ -89,12 +89,16 @@ func shredDirectory(_ dir: URL) {
     try? fm.removeItem(at: dir)
 }
 
-/// Absolute, symlink-resolved directory containing `path`.
+/// Absolute, fully-canonicalized directory containing `path`. Uses realpath(3)
+/// so symlink firmlinks like /var → /private/var resolve consistently no matter
+/// how the directory was reached — otherwise the same project bound two ways
+/// could fail its own location check.
 func resolvedDir(of path: String) -> String {
-    URL(fileURLWithPath: path).standardizedFileURL
-        .deletingLastPathComponent()
-        .resolvingSymlinksInPath()
-        .path
+    let dir = URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent().path
+    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+    if realpath(dir, &buf) != nil { return String(cString: buf) }
+    // Directory doesn't exist yet (e.g. locking to a new path) — best effort.
+    return URL(fileURLWithPath: dir).resolvingSymlinksInPath().path
 }
 
 func decryptSecrets(_ path: String, action: String) -> Data {

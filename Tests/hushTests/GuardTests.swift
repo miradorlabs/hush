@@ -85,11 +85,17 @@ final class SecretScrubTests: XCTestCase {
 }
 
 final class PathTests: XCTestCase {
-    func testResolvedDirIsAbsoluteParent() throws {
+    func testResolvedDirCanonicalAndConsistent() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hushpath-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let file = dir.appendingPathComponent(".hush").path
-        XCTAssertEqual(resolvedDir(of: file), dir.resolvingSymlinksInPath().path)
+        // The same directory reached two ways must bind to the same path —
+        // this is the consistency the exploit suite caught hush violating.
+        let direct = resolvedDir(of: dir.appendingPathComponent(".hush").path)
+        let viaDot = resolvedDir(of: dir.appendingPathComponent("./.hush").path)
+        XCTAssertEqual(direct, viaDot)
+        XCTAssertTrue(direct.hasPrefix("/"))
+        XCTAssertFalse(direct.hasSuffix("/.hush"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: direct))
     }
 }

@@ -1,4 +1,9 @@
-# hush
+# Hush 🤫
+
+[![ci](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+&nbsp;Apache-2.0 · zero dependencies · macOS Secure Enclave
+
+> Replace `OWNER/REPO` in the badge URL once the repo is published.
 
 `.env` files sealed to your Mac's Secure Enclave. Secrets are encrypted into a
 `.hush` file, and reading them back — to run your app, print a value, or edit —
@@ -40,10 +45,19 @@ gets ciphertext only.
 make install          # builds + ad-hoc signs + installs to ~/.local/bin
 ```
 
+Or via Homebrew once a release is tagged (see `Formula/hush.rb`):
+
+```sh
+brew install OWNER/tap/hush          # after publishing to a tap
+# or, from a checkout:
+brew install --build-from-source ./Formula/hush.rb
+```
+
 ## Develop & test
 
 ```sh
-make test             # unit tests (no Touch ID needed — 27 cases)
+make test             # unit + exploit + fuzz tests (no Touch ID needed — 41 cases)
+make exploit          # drive the real binary through attacks it must refuse
 make demo             # installs, then runs the non-interactive walkthrough
 ```
 
@@ -51,8 +65,43 @@ make demo             # installs, then runs the non-interactive walkthrough
 parsing, sealed-file serialization, the ECIES + AES-GCM round trip and its
 location-binding/signature guarantees (via a software stand-in key), decoy
 generation, the package-manager and MITM-on-delivery guards, fingerprinting,
-and secret scrubbing. The auth-gated paths (`lock`/`run`) are exercised by hand
-through `examples/web-app` — see its README.
+and secret scrubbing — plus seeded fuzz tests that throw thousands of random
+inputs at the two parsers (dotenv and `.hush`), the only paths that ingest
+untrusted data.
+
+### Exploit tests
+
+Each defense has an adversarial regression test that plays the attacker and
+asserts the attack is refused — so a future change that weakens a guarantee
+fails the build. Two layers:
+
+- **`Tests/hushTests/ExploitTests.swift`** (in `make test`) — unit-level
+  attacks: at-rest read yields only ciphertext (CVE-2025-55284 class), the
+  substitution forgery (knowing the public key isn't enough), signature-strip
+  downgrade, ciphertext tamper, exfil-by-relocation, header-forge to fake the
+  location, supply-chain install scrape, wrapper/PATH interposition, key-swap
+  fingerprint detection, decoy-has-no-real-secret, and alert-can't-leak-the-secret.
+- **`tests/exploits.sh`** (`make exploit`) — drives the installed `hush` binary
+  through the attacks that fail *before* any prompt: a forged/stripped/relocated
+  `.hush` planted in a project, a blocked `npm install`, and `PATH`/`./wrapper`
+  interposition. All must exit non-zero for the documented reason.
+
+The auth-gated paths (`lock`/`run`) are exercised by hand through
+`examples/web-app` — see its README.
+
+## Trust & security
+
+- **[`THREATMODEL.md`](THREATMODEL.md)** — what hush protects, the cryptographic
+  construction, and the explicit non-goals, each tied to a test.
+- **[`SECURITY.md`](SECURITY.md)** — how to report a vulnerability, and scope.
+- **[`RELEASING.md`](RELEASING.md)** — reproducible builds, Developer ID signing,
+  notarization, and checksums, so a published binary can be verified against
+  source.
+- **Zero third-party dependencies** (CI-enforced) — only Apple frameworks, so
+  there's no transitive supply chain to compromise.
+- **Standard primitives** — Apple CryptoKit (P-256 / HKDF-SHA256 / AES-256-GCM),
+  not hand-rolled crypto. The bespoke composition is documented in the threat
+  model for review.
 
 ## Usage
 
