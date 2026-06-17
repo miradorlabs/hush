@@ -17,6 +17,30 @@ enum Doctor {
         return (p.terminationStatus, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// Run an executable directly (never via `/bin/sh -c`) and capture
+    /// stdout+stderr. Use this whenever an argument is a path/filename that
+    /// could contain shell metacharacters — interpolating one into a shell
+    /// command is a command-injection sink a secrets tool must not have.
+    @discardableResult
+    static func runTool(_ path: String, _ args: [String]) -> (status: Int32, out: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return (127, "") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Whether the binary at `path` is signed with the hardened runtime. Runs
+    /// codesign directly so a path with shell metacharacters can't inject.
+    static func hardenedRuntimeEnabled(at path: String) -> Bool {
+        runTool("/usr/bin/codesign", ["-dv", path]).out.contains("runtime")
+    }
+
     static func run() -> Int32 {
         var problems = 0
         func ok(_ msg: String) { print("  ✓ \(msg)") }
@@ -167,7 +191,7 @@ enum Doctor {
         } else {
             ok("binary is not writable by your user")
         }
-        if sh("codesign -dv '\(selfPath)' 2>&1").out.contains("runtime") {
+        if hardenedRuntimeEnabled(at: selfPath) {
             ok("hardened runtime enabled (DYLD injection blocked)")
         } else {
             bad("hardened runtime not enabled on this binary", fix: "rebuild with `make install` (signs with -o runtime)")

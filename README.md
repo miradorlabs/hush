@@ -281,5 +281,8 @@ so you're not surprised:
   Apple Watch approval if you have that enabled.
 - A v1 identity created before signing existed is upgraded automatically on
   next use (a signing key is added — no auth needed for that), after which
-  locking begins to prompt. Existing v1 unsigned `.hush` files must be
-  re-locked once: `hush unlock` then `hush lock`.
+  locking begins to prompt. Note that current hush rejects any *unsigned*
+  `.hush` at every read path — including `hush unlock` — so an unsigned file
+  left over from a pre-release build can't be migrated in place; re-create it
+  from the original `.env` with `hush lock`. (0.1.0 is the first release, so
+  this only affects local pre-release artifacts.)
