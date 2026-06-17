@@ -31,7 +31,9 @@ First release in preparation; everything below will ship as `0.1.0` once tagged.
 - Tests: unit, exploit, and seeded fuzz suites (`make test`); a CLI exploit
   suite against the installed binary (`make exploit`).
 - Project: Apache-2.0 license, `SECURITY.md`, `THREATMODEL.md`, `RELEASING.md`,
-  GitHub Actions CI, a runnable `examples/web-app`, and a Homebrew formula.
+  GitHub Actions CI, a tag-triggered release workflow (publishes a GitHub release
+  and opens a PR pinning the Homebrew formula), a runnable `examples/web-app`, and
+  a Homebrew formula.
 
 ### Fixed
 - `resolvedDir` now canonicalizes via `realpath(3)`, so the same project reached
@@ -44,4 +46,4 @@ First release in preparation; everything below will ship as `0.1.0` once tagged.
 - Secret values are scrubbed from every log line and alert, so telemetry can't
   itself leak a secret.
 
-[Unreleased]: https://github.com/OWNER/REPO/commits/main
+[Unreleased]: https://github.com/miradorlabs/hush/commits/main
