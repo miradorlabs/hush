@@ -18,6 +18,11 @@ enum Watch {
         let sink: FileHandle
         let onExposure: (String) -> Void
         private var buf = Data()
+        // `feed` runs on the pipe's background readability queue, but after the
+        // child exits we drain the remainder synchronously on the main thread —
+        // setting readabilityHandler=nil doesn't wait for an in-flight handler,
+        // so both could touch `buf` at once. Serialize all buffer access.
+        private let lock = NSLock()
 
         init(watched: [(key: String, value: String)], redact: Bool, sink: FileHandle,
              onExposure: @escaping (String) -> Void) {
@@ -25,6 +30,7 @@ enum Watch {
         }
 
         func feed(_ data: Data) {
+            lock.lock(); defer { lock.unlock() }
             buf.append(data)
             while let nl = buf.range(of: Data([0x0A])) {
                 let line = buf.subdata(in: buf.startIndex..<nl.upperBound)
@@ -34,6 +40,7 @@ enum Watch {
         }
 
         func flush() {
+            lock.lock(); defer { lock.unlock() }
             if !buf.isEmpty { emit(buf); buf.removeAll() }
         }
 

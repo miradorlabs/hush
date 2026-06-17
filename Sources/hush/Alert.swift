@@ -20,18 +20,26 @@ enum Alert {
     }
 
     private static func macNotify(title: String, message: String) {
-        func esc(_ s: String) -> String {
-            s.replacingOccurrences(of: "\\", with: "")
-             .replacingOccurrences(of: "\"", with: "'")
-        }
-        let script = "display notification \"\(esc(message))\" with title \"\(esc(title))\" sound name \"Funk\""
-        run("/usr/bin/osascript", ["-e", script], timeout: 5)
+        run("/usr/bin/osascript", osascriptArgs(title: title, message: message), timeout: 5)
+    }
+
+    /// Pass the title/message to osascript as runtime arguments (`on run argv`)
+    /// rather than splicing them into the script source — so no notification
+    /// text, whatever characters it contains, can be parsed as AppleScript.
+    /// Factored out so it's unit-testable.
+    static func osascriptArgs(title: String, message: String) -> [String] {
+        ["-e", "on run argv",
+         "-e", "display notification (item 1 of argv) with title (item 2 of argv) sound name \"Funk\"",
+         "-e", "end run",
+         message, title]
     }
 
     private static func postWebhook(_ url: String, text: String) {
         let payload = (try? String(decoding: JSONEncoder().encode(["text": text]), as: UTF8.self)) ?? "{}"
+        // `--` so a webhook URL that happens to start with `-` can't be parsed
+        // as a curl option.
         run("/usr/bin/curl", ["-s", "-m", "5", "-X", "POST",
-                              "-H", "Content-Type: application/json", "-d", payload, url], timeout: 8)
+                              "-H", "Content-Type: application/json", "-d", payload, "--", url], timeout: 8)
     }
 
     private static func run(_ path: String, _ args: [String], timeout: Double) {
