@@ -1,9 +1,7 @@
 # Hush 🤫
 
-[![ci](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![ci](https://github.com/miradorlabs/hush/actions/workflows/ci.yml/badge.svg)](https://github.com/miradorlabs/hush/actions/workflows/ci.yml)
 &nbsp;Apache-2.0 · zero dependencies · macOS Secure Enclave
-
-> Replace `OWNER/REPO` in the badge URL once the repo is published.
 
 `.env` files sealed to your Mac's Secure Enclave. Secrets are encrypted into a
 `.hush` file, and reading them back — to run your app, print a value, or edit —
@@ -48,7 +46,7 @@ make install          # builds + ad-hoc signs + installs to ~/.local/bin
 Or via Homebrew once a release is tagged (see `Formula/hush.rb`):
 
 ```sh
-brew install OWNER/tap/hush          # after publishing to a tap
+brew install miradorlabs/tap/hush    # after publishing to a tap
 # or, from a checkout:
 brew install --build-from-source ./Formula/hush.rb
 ```

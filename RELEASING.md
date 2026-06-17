@@ -3,6 +3,35 @@
 A tool that guards secrets must not itself be a supply-chain risk. This is how a
 release is built so that users can trust the binary matches the source.
 
+## Automated releases (tag-triggered)
+
+Pushing a semver tag runs `.github/workflows/release.yml`, which builds, runs the
+full test + exploit suite, and on green publishes a GitHub release and pins the
+Homebrew formula to the new source tarball:
+
+```sh
+git tag -s v0.1.0 -m v0.1.0      # signed tag
+git push origin v0.1.0
+```
+
+The workflow:
+
+- runs `make test` and `make exploit` (release is gated on both passing),
+- runs `make dist` and attaches `dist/hush` + `dist/hush.sha256` to the release,
+- computes the SHA-256 of the GitHub source tarball and opens a PR pinning
+  `Formula/hush.rb` to it — review and merge to make `brew install` resolve the
+  new release.
+
+The CI-built binary is **ad-hoc signed** with the hardened runtime, not Developer
+ID signed or notarized — so the recommended install path stays Homebrew
+(build-from-source). The manual steps below are the signed + notarized path for
+when an Apple Developer account is available; run them locally and attach the
+notarized artifact to the release the workflow created.
+
+> The formula bump opens a PR with the built-in `GITHUB_TOKEN`, so it works with
+> branch protection on `main`. Enable Settings → Actions → General → "Allow
+> GitHub Actions to create and approve pull requests" so the workflow can open it.
+
 ## Principles
 
 - **Zero third-party dependencies.** hush links only Apple frameworks. CI

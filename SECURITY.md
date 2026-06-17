@@ -11,8 +11,8 @@ Preferred: use GitHub's private vulnerability reporting (the **Security** tab â†
 **Report a vulnerability**). This keeps the report confidential until a fix is
 available.
 
-Alternative: email the maintainers at `<security-contact@your-domain>` (replace
-with a real address before publishing). PGP key, if any, goes here.
+Alternative: email the maintainers at `support@mirador.org`. PGP key, if any,
+goes here.
 
 Please include: the version/commit, your platform (macOS version, Apple Silicon
 or Intel/T2), a description of the issue, and a proof-of-concept if you have one.

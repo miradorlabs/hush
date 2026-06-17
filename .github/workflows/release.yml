@@ -1,0 +1,104 @@
+name: release
+
+# Push a semver tag to cut a release:
+#   git tag -s v0.1.0 -m v0.1.0 && git push origin v0.1.0
+#
+# This builds + runs the full test/exploit suite, ad-hoc signs the binary with
+# the hardened runtime (`make dist`), publishes a GitHub release with the binary
+# and its SHA-256, and pins the Homebrew formula to the new source tarball.
+#
+# This is the "basic" path: ad-hoc signed, not Developer ID signed / notarized.
+# Users install via Homebrew (build-from-source) — see RELEASING.md for the
+# signed + notarized path when an Apple Developer account is available.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write        # create the GitHub release + push the formula-bump branch
+  pull-requests: write   # open the formula-bump PR
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + branches, so we can commit the formula bump to main
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Confirm zero third-party dependencies
+        run: |
+          if [ -f Package.resolved ] && [ "$(jq '.pins | length' Package.resolved 2>/dev/null || echo 0)" != "0" ]; then
+            echo "::error::hush must have zero third-party dependencies"; exit 1
+          fi
+          echo "ok: no external dependencies"
+
+      - name: Unit + exploit tests
+        run: make test
+
+      - name: CLI exploit suite (pre-prompt refusals)
+        run: make exploit
+
+      - name: Build release artifact + checksum
+        run: make dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            dist/hush dist/hush.sha256 \
+            --title "$TAG" \
+            --generate-notes
+          # Append a verification footer to the auto-generated notes.
+          BODY=$(gh release view "$TAG" --json body -q .body)
+          FOOTER=$'\n\n---\n**Verify:** `shasum -a 256 hush` against `hush.sha256`. The attached binary is ad-hoc signed with the hardened runtime; for a Gatekeeper-trusted install, build from source via Homebrew (`brew install miradorlabs/tap/hush`) — see RELEASING.md.'
+          gh release edit "$TAG" --notes "${BODY}${FOOTER}"
+
+      - name: Open PR to pin Homebrew formula to the released source tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          # GitHub generates the source tarball on demand; retry until it's ready.
+          SHA=$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors "$URL" | shasum -a 256 | awk '{print $1}')
+          echo "source tarball sha256: $SHA"
+
+          BRANCH="chore/formula-${TAG}"
+          git fetch origin main
+          git checkout -B "$BRANCH" origin/main
+          perl -pi -e "s|archive/refs/tags/v[0-9][0-9A-Za-z.\-]*\.tar\.gz|archive/refs/tags/${TAG}.tar.gz|" Formula/hush.rb
+          perl -pi -e "s|^(\s*)sha256 \".*\"|\${1}sha256 \"${SHA}\"|" Formula/hush.rb
+
+          if git diff --quiet -- Formula/hush.rb; then
+            echo "formula already up to date; no PR needed"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/hush.rb
+          git commit -m "chore(release): pin Homebrew formula to ${TAG}"
+          git push --force origin "$BRANCH"
+
+          # Open the PR (skip if a re-run already left one open for this tag).
+          # Requires Settings → Actions → General → "Allow GitHub Actions to
+          # create and approve pull requests" to be enabled.
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')" ]; then
+            echo "PR already open for $BRANCH"
+          else
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore(release): pin Homebrew formula to ${TAG}" \
+              --body "Automated by the release workflow: pins \`Formula/hush.rb\` to the \`${TAG}\` source tarball (\`sha256 ${SHA}\`). Review and merge to make \`brew install\` resolve the new release."
+          fi
