@@ -4,18 +4,47 @@
 &nbsp;Apache-2.0 · zero dependencies · macOS Secure Enclave
 
 `.env` files sealed to your Mac's Secure Enclave. Secrets are encrypted into a
-`.hush` file, and reading them back — to run your app, print a value, or edit —
+`.hush` file, and reading them back, to run your app, print a value, or edit —
 always triggers the native macOS Touch ID / password prompt. `cat .hush`, a
 leaked backup, a stray `git add`, or a rogue script reading your home directory
 gets ciphertext only.
 
 ## How it works
 
-- `hush init` generates **two P-256 keys inside the Secure Enclave** — one for
+```mermaid
+flowchart TB
+    subgraph disk["On disk: all a backup, a stray git add, or a rogue process can read"]
+        ENV["📄 .env<br/>plaintext secrets"]
+        HUSH["🔒 .hush<br/>ciphertext + signature + bound path<br/>(the only file left after lock)"]
+    end
+
+    subgraph sep["🔒 Secure Enclave: private keys physically never leave this chip"]
+        SK["🔏 signing key"]
+        AK["🔑 key-agreement key"]
+    end
+
+    ENV -->|"hush lock"| ENC["encrypt<br/>ECIES, then AES-256-GCM<br/>(public key, directory as AAD)"]
+    ENC --> SG["sign<br/>🔐 Touch ID"]
+    SK -. authorizes .-> SG
+    SG --> HUSH
+
+    HUSH -->|"hush run / show / edit"| VF["verify signature<br/>(public key, no prompt)"]
+    VF -->|"forged or tampered"| RJ["❌ rejected before any prompt"]
+    VF -->|valid| BD{"bound path matches<br/>this location?"}
+    BD -->|no| RB["❌ refuse, then hush rebind"]
+    BD -->|yes| DC["decrypt inside enclave<br/>🔐 Touch ID"]
+    AK -. ECDH .-> DC
+    DC --> APP["secrets in memory<br/>(exec app / print / edit)<br/>plaintext never touches disk"]
+```
+
+Seal once (encrypt, then sign); every read is verified and gated by the enclave
+before a single byte is decrypted. The details:
+
+- `hush init` generates **two P-256 keys inside the Secure Enclave**: one for
   key agreement (decryption), one for signing (authenticity) — both with
   `userPresence` access control baked in. The private keys physically cannot
   leave the chip; what's stored in `~/.hush/identity.json` is an opaque blob
-  only *this Mac's* enclave can use — useless if exfiltrated.
+  only *this Mac's* enclave can use, useless if exfiltrated.
 - `hush lock` encrypts with the **public** agreement key (ECIES: ephemeral
   P-256 ECDH → HKDF-SHA256 → AES-256-GCM), then **signs** the result with the
   enclave signing key — so the lock prompts once for your fingerprint.
