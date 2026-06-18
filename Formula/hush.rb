@@ -13,8 +13,8 @@
 class Hush < Formula
   desc ".env files sealed to your Mac's Secure Enclave (Touch ID gated)"
   homepage "https://github.com/miradorlabs/hush"
-  url "https://github.com/miradorlabs/hush/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_SOURCE_TARBALL_SHA256"
+  url "https://github.com/miradorlabs/hush/archive/refs/tags/v1.0.0.tar.gz"
+  sha256 "5dc0b961d4068cc5beea0632f29d7a9d13a96ffb11431cc8431242d82480822a"
   license "Apache-2.0"
 
   depends_on xcode: ["14.0", :build]

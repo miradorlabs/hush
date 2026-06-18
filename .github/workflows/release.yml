@@ -53,14 +53,23 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            dist/hush dist/hush.sha256 \
-            --title "$TAG" \
-            --generate-notes
-          # Append a verification footer to the auto-generated notes.
+          # Idempotent: a re-run on an existing tag updates assets instead of
+          # failing, so the formula-pin step below always gets a chance to run.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; updating assets"
+            gh release upload "$TAG" dist/hush dist/hush.sha256 --clobber
+          else
+            gh release create "$TAG" \
+              dist/hush dist/hush.sha256 \
+              --title "$TAG" \
+              --generate-notes
+          fi
+          # Append the verification footer once (skip if it's already there).
           BODY=$(gh release view "$TAG" --json body -q .body)
           FOOTER=$'\n\n---\n**Verify:** `shasum -a 256 hush` against `hush.sha256`. The attached binary is ad-hoc signed with the hardened runtime; for a Gatekeeper-trusted install, build from source via Homebrew (`brew install miradorlabs/tap/hush`) — see RELEASING.md.'
-          gh release edit "$TAG" --notes "${BODY}${FOOTER}"
+          if ! printf '%s' "$BODY" | grep -q '\*\*Verify:\*\*'; then
+            gh release edit "$TAG" --notes "${BODY}${FOOTER}"
+          fi
 
       - name: Open PR to pin Homebrew formula to the released source tarball
         env:
