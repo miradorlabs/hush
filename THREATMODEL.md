@@ -74,6 +74,9 @@ intended review surface.
 | Tampered AI-tool config is detected (opt-in) | Signed config fingerprint, re-checked pre-prompt | `test_configModification_detected`, `test_configFingerprintTamper_breaksSignature`, `test_configStripDowngrade_rejected` |
 | MCP gateway enforces least-privilege | `.hushmcp.json` allow/deny + host allowlist, checked before decrypt | `GatewayPolicyTests`, `testGetSecretDeniedByPolicyNeverDecrypts`, `testHttpRequestToUnallowlistedHostRefused` |
 | Secret usable for a request without entering model context | Server-side `{{secret:NAME}}` substitution in `http_request` | `SecretTemplatingTests` |
+| Sandboxed run can't write a backdoor / move laterally | Seatbelt profile via `sandbox-exec` (guard denies ~/.ssh,~/.aws,…; strict denies-default writes) | `SandboxProfileTests`, `SandboxEnforcementTests` |
+| Tampered/replaced AI tool is detected | codesign + Gatekeeper + trust-on-first-use signer pin; content-hash pin for JS CLIs | `VerifyPinTests`, `VerifyScanTests` |
+| Per-assistant least-privilege secret sets | `hush lock .env.backend` + `hush run -f .env.backend`; the set is named in the audit log | `CompartmentTests` |
 
 `tests/exploits.sh` re-runs the file-forgery, relocation, downgrade, guard, and
 interposition attacks against the actual installed binary.
@@ -89,6 +92,20 @@ interposition attacks against the actual installed binary.
   `hush reconfig` re-authorizes a deliberate change. It cannot stop config you
   approve, and a same-user attacker who also runs `hush reconfig` defeats it; it
   closes the *silent* swap.
+- **Sandboxed execution** (`hush run --sandbox[=strict]`) — wraps the launched
+  command in a macOS Seatbelt profile so a compromised tool can't write a
+  persistent backdoor (`~/.ssh`), rewrite credentials for lateral movement
+  (`~/.aws`, `~/.kube`), drop a LaunchAgent, or edit your shell rc, even with the
+  injected secrets in hand. `guard` denies the sensitive write set; `strict`
+  denies writes by default (project + temp only); `--no-network` gates egress.
+  Write-containment, not an unescapable jail (see non-goal 7).
+- **Assistant verification** (`hush verify-assistant`) — codesign + Gatekeeper +
+  a trust-on-first-use signer pin (content-hash pin for JS CLIs) plus a config
+  injection scan, so a swapped/tampered tool or an injected startup hook is caught
+  before you trust it with secrets. Tamper-evident, not tamper-proof (non-goal 4).
+- **Compartmentalization** — per-assistant secret sets (`hush lock .env.backend`
+  → `hush run -f .env.backend`); the audit log names the set each agent used, so a
+  single compromise has a bounded blast radius.
 - **MCP secrets gateway** (`hush mcp`) — your AI tool requests secrets through a
   stdio MCP server instead of reading `.env` directly. Each request runs the full
   check path and a Touch ID prompt naming the caller and key, is audited, and is
@@ -123,6 +140,12 @@ hush does **not** defend against:
 5. **Persistent root compromise.**
 6. **Plaintext that already escaped** (git history, backups, APFS snapshots) —
    rotation is the only fix; `hush doctor` tells you when.
+7. **A sandbox escape, or what `--sandbox` deliberately allows.** `hush run
+   --sandbox` is write-containment via Seatbelt (`sandbox-exec`, which Apple has
+   deprecated): a kernel-level escape defeats it, it still permits reads and
+   (unless `--no-network`) network egress, and `strict` necessarily allows writes
+   to the project and tool caches. It bounds persistence/lateral-movement, not
+   data exfiltration.
 
 ## Verifying these claims
 
