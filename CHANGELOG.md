@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 First release in preparation; everything below will ship as `0.1.0` once tagged.
 
 ### Added
+- **Secrets gateway over MCP** (`hush mcp`): a stdio JSON-RPC MCP server so an AI
+  tool requests secrets through tools (`list_secrets`, `get_secret`,
+  `http_request`) instead of reading `.env` directly. Every request runs the full
+  check path plus a Touch ID prompt naming the caller and key, is audited, and is
+  scoped by a project-local `.hushmcp.json` least-privilege policy (key allow/deny
+  + host allowlist). `http_request` substitutes `{{secret:NAME}}` placeholders
+  server-side, so a secret can be used for a network call without ever entering
+  the model context, and only to an allowlisted host. Hand-rolled on Foundation
+  to keep the zero-dependency guarantee.
 - **Config File Integrity Binding** (`hush lock --bind-config`, `hush reconfig`):
   optionally fingerprint the AI-tool config surface (`CLAUDE.md`, `AGENTS.md`,
   `.claude/agents`, `.claude/commands`, `.cursor` rules, `.vscode/settings.json`
