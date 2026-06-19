@@ -7,8 +7,8 @@ import Foundation
 /// `.cursor` rules, `.vscode` tasks, Copilot instructions. A prompt-injection or
 /// a malicious commit that rewrites one of these can turn your own assistant into
 /// the exfiltrator — it reads `.env` (which it is allowed to) and ships it out.
-/// That is the CVE-2025-55284 shape, except the injected instruction lives in a
-/// file you trust rather than in the data the agent is processing.
+/// The only twist is that the injected instruction lives in a file you trust
+/// rather than in the data the agent is processing.
 ///
 /// When you `hush lock --bind-config`, hush fingerprints that config surface and
 /// binds the fingerprint into the sealed file (signed by the Secure Enclave, so

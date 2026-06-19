@@ -3,7 +3,7 @@ import Foundation
 
 /// Builds a believable-but-fake `.env` to leave in place of the real one.
 ///
-/// The threat (CVE-2025-55284 and the npm/MCP secret-scanners): an injected
+/// The threat (prompt-injected agents and npm/MCP secret-scanners): an injected
 /// agent or post-install script reads `.env` and exfiltrates it. A decoy turns
 /// that read into a tripwire — if you wire the embedded values to canary
 /// tokens (canarytokens.org, AWS canary keys), their *use* or even DNS
