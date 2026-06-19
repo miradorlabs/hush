@@ -143,6 +143,7 @@ hush show DATABASE_URL        # prompt → print one value
 hush edit                     # prompt → $EDITOR → re-encrypted on save
 hush unlock                   # prompt → write plaintext .env back (escape hatch)
 hush rebind                   # prompt → re-authorize after moving a project
+hush reconfig                 # prompt → re-authorize AI-tool config after a change
 hush decoy                    # write a fake .env wired to canary tokens
 hush log                      # show the access log (every decrypt attempt)
 hush doctor                   # audit: leftover plaintext, git leaks, exposure
@@ -226,6 +227,22 @@ so you're not surprised:
   shared `/tmp`. Note the overwrite is best-effort: on SSDs it does *not*
   guarantee the old bytes are unrecoverable (wear-leveling / APFS
   copy-on-write). FileVault and secret rotation are what you actually lean on.
+- **Config File Integrity Binding** (opt-in, `hush lock --bind-config`): AI coding
+  tools are steered by in-repo config (`CLAUDE.md`, `.claude/agents`, `.cursor`
+  rules, `.vscode/tasks.json`, Copilot instructions). A prompt-injection or a
+  malicious commit that rewrites one of these can turn your own assistant into
+  the exfiltrator: it reads `.env` (which it is allowed to) and ships it out, the
+  CVE-2025-55284 shape with the instruction living in a file you trust. With
+  `--bind-config`, hush fingerprints that config surface and binds the
+  fingerprint into the sealed file, signed by the Secure Enclave so it cannot be
+  edited to match a tampered config. Every later decrypt recomputes it before the
+  Touch ID prompt and refuses, with an alert, if anything changed since the seal.
+  Re-authorize a change you made on purpose with `hush reconfig` (Touch ID), and
+  `hush doctor` reports the binding status. It is detection, not prevention: it
+  cannot stop config you approve, but it closes the *silent* swap that would
+  otherwise ride your next approved decrypt unnoticed. Opt-in by design, because
+  config like `.vscode/settings.json` changes often and a check that fired on
+  every benign edit would just train you to bypass it.
 - **Honeytoken decoy** (`hush lock --decoy`, `hush decoy`): leaves a believable
   fake `.env` where the real one was. The recent CVE-2025-55284 class of attack
   is "prompt-inject an agent → it reads `.env` → exfiltrates it"; the npm/MCP

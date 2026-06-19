@@ -99,11 +99,16 @@ enum HushCrypto {
     /// Encrypt, then sign with the Secure Enclave signing key. Signing triggers
     /// the auth prompt — so *authoring* a file you'll later trust requires your
     /// fingerprint, which is what stops an attacker from forging one.
-    static func seal(_ plaintext: Data, identity: Identity, directory: String, reason: String) throws -> SealedFile {
+    static func seal(_ plaintext: Data, identity: Identity, directory: String,
+                     config: (paths: [String], fingerprint: Data)? = nil, reason: String) throws -> SealedFile {
         guard let skData = identity.signingPrivateKey else {
             throw HushError("identity has no signing key — re-run `hush init`")
         }
         var file = try encrypt(plaintext, identity: identity, directory: directory)
+        if let config {
+            file.configPaths = config.paths.sorted()
+            file.configFingerprint = config.fingerprint
+        }
         let context = LAContext()
         context.localizedReason = reason
         let key: SecureEnclave.P256.Signing.PrivateKey
@@ -183,11 +188,24 @@ struct SealedFile {
     var ephemeralPublicKey: Data
     var ciphertext: Data
     var signature: Data?
+    // Config File Integrity Binding (optional). `configPaths` is the AI-tool
+    // config surface watched at seal time; `configFingerprint` is the SHA-256 of
+    // its contents. Both are covered by the signature, so an attacker can't edit
+    // the `cfg:` line to match a config they tampered with, nor strip the lines
+    // to downgrade (the payload would no longer match the signature).
+    var configPaths: [String]?
+    var configFingerprint: Data?
 
     static let banner = "#!hush v1 — secrets sealed to this Mac's Secure Enclave; run `hush` to access (requires Touch ID / password)"
 
+    /// Canonical config-path bytes the header and signature share: sorted, then
+    /// comma-joined. One place so serialization and signing can never diverge.
+    func canonicalConfigPaths() -> String { (configPaths ?? []).sorted().joined(separator: ",") }
+
     /// Canonical, length-prefixed bytes the signature covers. Length prefixes
-    /// keep the boundary between fields unambiguous.
+    /// keep the boundary between fields unambiguous. The config fields are only
+    /// appended when present, so files sealed without config binding produce the
+    /// exact same payload as before — their existing signatures still verify.
     func signedPayload() -> Data {
         var out = HushCrypto.sigDomain
         func append(_ field: Data) {
@@ -198,6 +216,10 @@ struct SealedFile {
         append(Data((directory ?? "").utf8))
         append(ephemeralPublicKey)
         append(ciphertext)
+        if let configFingerprint {
+            append(Data(canonicalConfigPaths().utf8))
+            append(configFingerprint)
+        }
         return out
     }
 
@@ -205,6 +227,10 @@ struct SealedFile {
         var lines = [Self.banner, "dir: \(directory ?? "")",
                      "eph: \(ephemeralPublicKey.base64EncodedString())",
                      "ct: \(ciphertext.base64EncodedString())"]
+        if let configFingerprint {
+            lines.append("cfgpaths: \(canonicalConfigPaths())")
+            lines.append("cfg: \(configFingerprint.base64EncodedString())")
+        }
         if let signature { lines.append("sig: \(signature.base64EncodedString())") }
         return lines.joined(separator: "\n") + "\n"
     }
@@ -214,15 +240,20 @@ struct SealedFile {
         var eph: Data?
         var ct: Data?
         var sig: Data?
+        var cfgPaths: [String]?
+        var cfgFingerprint: Data?
         for line in text.split(separator: "\n") {
             if line.hasPrefix("dir: ") { dir = String(line.dropFirst(5)) }
             if line.hasPrefix("eph: ") { eph = Data(base64Encoded: String(line.dropFirst(5))) }
             if line.hasPrefix("ct: ") { ct = Data(base64Encoded: String(line.dropFirst(4))) }
+            if line.hasPrefix("cfgpaths: ") { cfgPaths = String(line.dropFirst(10)).split(separator: ",").map(String.init) }
+            else if line.hasPrefix("cfg: ") { cfgFingerprint = Data(base64Encoded: String(line.dropFirst(5))) }
             if line.hasPrefix("sig: ") { sig = Data(base64Encoded: String(line.dropFirst(5))) }
         }
         guard let eph, let ct else { throw HushError("not a valid .hush file") }
         return SealedFile(directory: dir?.isEmpty == true ? nil : dir,
-                          ephemeralPublicKey: eph, ciphertext: ct, signature: sig)
+                          ephemeralPublicKey: eph, ciphertext: ct, signature: sig,
+                          configPaths: cfgPaths, configFingerprint: cfgFingerprint)
     }
 }
 
