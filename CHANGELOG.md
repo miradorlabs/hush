@@ -9,6 +9,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 First release in preparation; everything below will ship as `0.1.0` once tagged.
 
 ### Added
+- **Sandboxed execution** (`hush run --sandbox[=strict]`, `--no-network`,
+  `--sandbox-allow`): wrap the launched command in a macOS Seatbelt profile so a
+  compromised tool can't write a backdoor to `~/.ssh`, rewrite `~/.aws`/`~/.kube`
+  for lateral movement, drop a LaunchAgent, or edit your shell rc. `guard` denies
+  the sensitive write set; `strict` denies writes by default (project + temp
+  only). Write-containment, not an unescapable jail.
+- **Assistant verification** (`hush verify-assistant`, `hush init
+  --verify-assistants`): codesign + Gatekeeper checks with a trust-on-first-use
+  signer pin (content-hash pin for JS CLIs like Claude Code/Copilot), plus a scan
+  of shell and AI-tool config for injection red flags.
+- **Compartmentalization ergonomics**: `hush run -f .env.backend` resolves to the
+  `.env.backend.hush` produced by `hush lock .env.backend`, and the access log now
+  names which secret set (and any sandbox) each run used.
 - **Secrets gateway over MCP** (`hush mcp`): a stdio JSON-RPC MCP server so an AI
   tool requests secrets through tools (`list_secrets`, `get_secret`,
   `http_request`) instead of reading `.env` directly. Every request runs the full

@@ -79,6 +79,17 @@ func loadSealed(_ path: String) -> SealedFile {
     do { return try SealedFile.parse(text) } catch { fail("\(path): \(error)") }
 }
 
+/// Compartmentalization ergonomics: a bare `-f .env.backend` resolves to the
+/// `.env.backend.hush` that `hush lock .env.backend` produced, so per-assistant
+/// secret sets read naturally. Only substitutes when the literal path is absent
+/// and the `.hush`-suffixed one exists; never silently picks a different file.
+func resolveSealedPath(_ file: String) -> String {
+    let fm = FileManager.default
+    if fm.fileExists(atPath: file) { return file }
+    let suffixed = file + ".hush"
+    return fm.fileExists(atPath: suffixed) ? suffixed : file
+}
+
 /// Overwrite every file in `dir` then remove it. The overwrite is best-effort:
 /// on an SSD with wear-leveling / copy-on-write APFS it does NOT guarantee the
 /// old bytes are gone — the real protection is the 0700 directory (other users
@@ -206,6 +217,10 @@ func cmdInit(args: [String]) {
         note("decryption now requires Touch ID or your account password on this Mac")
     }
     note("next: `hush lock` in a project with a .env file")
+    if args.contains("--verify-assistants") {
+        note("verifying installed AI assistants (signature + Gatekeeper + config scan):")
+        _ = runAssistantVerification(targets: [], explicit: false, repin: true) // pin the current state as baseline at init
+    }
 }
 
 func cmdLock(args: [String]) {
@@ -299,6 +314,10 @@ func cmdRun(args: [String]) {
     var allowUnsafePath = false
     var watch = false
     var redact = false
+    var sandbox = false
+    var sandboxLevel = Sandbox.Level.guarded
+    var allowNetwork = true
+    var sandboxAllow: [String] = []
     var rest = args
     while let first = rest.first {
         if first == "-f" || first == "--file" {
@@ -321,6 +340,21 @@ func cmdRun(args: [String]) {
         } else if first == "--redact" {
             watch = true; redact = true
             rest.removeFirst()
+        } else if first == "--sandbox" || first.hasPrefix("--sandbox=") {
+            sandbox = true
+            if let eq = first.firstIndex(of: "=") {
+                let v = String(first[first.index(after: eq)...])
+                guard let lvl = Sandbox.Level(rawValue: v) else { fail("unknown --sandbox level \"\(v)\" (use guard or strict)") }
+                sandboxLevel = lvl
+            }
+            rest.removeFirst()
+        } else if first == "--no-network" {
+            allowNetwork = false
+            rest.removeFirst()
+        } else if first == "--sandbox-allow" {
+            rest.removeFirst()
+            guard !rest.isEmpty else { fail("--sandbox-allow needs a path") }
+            sandboxAllow.append(rest.removeFirst())
         } else if first == "--" {
             rest.removeFirst()
             break
@@ -328,7 +362,11 @@ func cmdRun(args: [String]) {
             break
         }
     }
-    guard !rest.isEmpty else { fail("usage: hush run [-f file] [--only K1,K2] [--watch] [--redact] [--allow-pkg] -- <command> [args...]") }
+    guard !rest.isEmpty else { fail("usage: hush run [-f file] [--only K1,K2] [--watch] [--redact] [--sandbox[=strict]] [--no-network] [--allow-pkg] -- <command> [args...]") }
+    if (!sandbox && (!allowNetwork || !sandboxAllow.isEmpty)) {
+        note("warning: --no-network/--sandbox-allow have no effect without --sandbox")
+    }
+    file = resolveSealedPath(file)
 
     if isPackageInstall(rest) && !allowPkg {
         AuditLog.record(.blocked, action: "run \(rest.joined(separator: " "))", detail: "package-manager guard")
@@ -350,7 +388,11 @@ func cmdRun(args: [String]) {
     let exePath = resolution!.path
     for w in resolution!.warnings { note("warning: \(w)") }
 
-    let label = "run \u{201C}\(rest.joined(separator: " "))\u{201D} with secrets"
+    // Name the secret set and any sandbox in the audit label, so `hush log`
+    // shows exactly which credentials each agent used and whether it was confined.
+    let setLabel = (file == defaultSecretsFile) ? "" : " from \((file as NSString).lastPathComponent)"
+    let sandboxLabel = sandbox ? " [sandbox:\(sandboxLevel.rawValue)\(allowNetwork ? "" : "+nonet")]" : ""
+    let label = "run \u{201C}\(rest.joined(separator: " "))\u{201D}\(setLabel)\(sandboxLabel) with secrets"
     let plaintext = decryptSecrets(file, action: only.map { "\(label) (only \($0.sorted().joined(separator: ",")))" } ?? label)
     var injected = DotEnv.parse(String(decoding: plaintext, as: UTF8.self))
     if let only {
@@ -362,17 +404,38 @@ func cmdRun(args: [String]) {
     }
     for (key, value) in injected { setenv(key, value, 1) }
 
+    // Optionally wrap the vetted command in a Seatbelt sandbox so a compromised
+    // tool can't write a backdoor / rewrite credentials / persist, even with the
+    // secrets in hand. Secrets are already in the environment, which the sandboxed
+    // child inherits, so injection still works.
+    var finalExe = exePath
+    var finalArgv = rest
+    if sandbox {
+        guard Sandbox.available() else { fail("--sandbox requested but \(Sandbox.sandboxExec) is unavailable on this macOS") }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let cwd = FileManager.default.currentDirectoryPath
+        let projectDir = (realpath(cwd, &buf) != nil) ? String(cString: buf) : cwd
+        let prof = Sandbox.profile(projectDir: projectDir, home: home, level: sandboxLevel,
+                                   extraWritable: sandboxAllow, allowNetwork: allowNetwork)
+        let wrapped = Sandbox.wrap(exePath: exePath, args: Array(rest.dropFirst()), profile: prof)
+        finalExe = wrapped.exe; finalArgv = wrapped.argv
+        note("sandbox \(sandboxLevel.rawValue): writes confined to the project + temp"
+            + (sandboxLevel == .guarded ? " (and blocked from ~/.ssh, ~/.aws, ~/.kube, …)" : "")
+            + (allowNetwork ? "" : "; network denied"))
+    }
+
     if watch {
         // Supervise instead of exec: stream output through a leak scanner.
         note("watching output for leaked secret values\(redact ? " (redacting)" : "")")
-        exit(Watch.supervise(rest, executablePath: exePath, secrets: injected, redact: redact))
+        exit(Watch.supervise(finalArgv, executablePath: finalExe, secrets: injected, redact: redact))
     }
 
     // execv (not execvp): run the absolute path we vetted, no second PATH lookup.
-    var argv: [UnsafeMutablePointer<CChar>?] = rest.map { strdup($0) }
+    var argv: [UnsafeMutablePointer<CChar>?] = finalArgv.map { strdup($0) }
     argv.append(nil)
-    execv(exePath, &argv)
-    fail("could not exec \(exePath): \(String(cString: strerror(errno)))")
+    execv(finalExe, &argv)
+    fail("could not exec \(finalExe): \(String(cString: strerror(errno)))")
 }
 
 func cmdShow(args: [String]) {
@@ -625,6 +688,65 @@ func cmdFingerprint(args: [String]) {
     note("teammates verify this fingerprint out-of-band before trusting your key (MITM defense for sharing)")
 }
 
+/// Verify a set of AI tools and scan config for injection. Shared by
+/// `verify-assistant` and `init --verify-assistants`; returns the problem count.
+func runAssistantVerification(targets: [String], explicit: Bool, repin: Bool) -> Int {
+    var problems = 0
+    var any = false
+    for t in (explicit ? targets : AssistantVerify.knownNames) {
+        let resolvable = FileManager.default.fileExists(atPath: t)
+            || AssistantVerify.candidatePaths(for: t).contains { FileManager.default.fileExists(atPath: $0) }
+        if !explicit && !resolvable { continue } // in --all/default mode, skip what isn't installed
+        any = true
+        let r = AssistantVerify.verify(nameOrPath: t, repin: repin)
+        print("\(r.ok ? "✓" : "✗") \(r.target)")
+        for c in r.checks { print("    \(c.ok ? "✓" : "✗") \(c.name): \(c.detail)") }
+        if !r.ok { problems += 1 }
+    }
+    if !any { note("no known assistants found installed (looked for: \(AssistantVerify.knownNames.joined(separator: ", ")))") }
+
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let cwd = FileManager.default.currentDirectoryPath
+    let findings = AssistantVerify.scanConfig(home: home, projectDir: cwd)
+    print("config-injection scan:")
+    if findings.isEmpty {
+        print("    ✓ no injection red flags in shell / AI-tool config")
+    } else {
+        for f in findings { print("    ✗ \(f.location): \(f.issue)") }
+        problems += findings.count
+        AuditLog.record(.denyForgery, action: "verify-assistant config scan", detail: "\(findings.count) red flag(s)")
+    }
+    return problems
+}
+
+func cmdVerifyAssistant(args: [String]) {
+    var targets: [String] = []
+    var all = false
+    var repin = false
+    var it = args.makeIterator()
+    while let a = it.next() {
+        switch a {
+        case "--all": all = true
+        case "--repin": repin = true
+        case "-h", "--help":
+            print("""
+            hush verify-assistant [NAME|PATH] [--all] [--repin]
+
+            Verify an AI coding tool before you trust it with secrets: code
+            signature + Gatekeeper for signed apps, a content-hash pin for JS CLIs,
+            trust-on-first-use, plus a scan of your shell / AI config for injection.
+            Known names: \(AssistantVerify.knownNames.joined(separator: ", ")).
+              --all     check every known assistant that's installed
+              --repin   accept the current state as the new pinned baseline
+            """)
+            return
+        default: targets.append(a)
+        }
+    }
+    let explicit = !all && !targets.isEmpty
+    exit(runAssistantVerification(targets: targets, explicit: explicit, repin: repin) == 0 ? 0 : 1)
+}
+
 let help = """
 hush — .env files sealed to your Mac's Secure Enclave
 
@@ -633,15 +755,18 @@ app, print, or edit — always triggers the macOS Touch ID / password prompt.
 
 usage:
   hush init [--biometry-only]    one-time: create a Secure Enclave key
-                                 (--biometry-only: fingerprint only, no password fallback)
+            [--verify-assistants] (--biometry-only: fingerprint only, no password
+                                 fallback; --verify-assistants: check installed AI
+                                 tools and pin them as a baseline)
   hush lock [.env] [--rm]        prompt → encrypt + sign .env → .hush
             [--decoy] [-o f]     (--decoy: leave a honeytoken .env behind;
             [--bind-config]       --bind-config: also bind the AI-tool config so
                                   decrypt refuses if CLAUDE.md/agents/rules change)
   hush run [-f f] [--only K1,K2] prompt → inject secrets as env vars → exec cmd
            [--watch] [--redact]  (--only: subset; --watch: alert if a secret
-           [--allow-pkg] -- cmd   leaks into output; --redact: mask it too.
-                                  command is resolved to a vetted absolute path)
+           [--sandbox[=strict]]   leaks into output; --sandbox: confine the command
+           [--no-network]         from writing ~/.ssh, ~/.aws, …; =strict denies all
+           [--allow-pkg] -- cmd   writes outside the project; --no-network gates net)
   hush show [-f f] [KEY]         prompt → print all secrets or one value
   hush edit [-f f]               prompt → edit in $EDITOR → re-encrypt
   hush unlock [-f f] [-o f]      prompt → write plaintext back out (escape hatch)
@@ -652,6 +777,8 @@ usage:
   hush mcp [--project DIR]       run the secrets gateway as an MCP (stdio) server:
                                  your AI tool requests secrets through it instead
                                  of reading .env — each request is Touch ID + logged
+  hush verify-assistant [name]   check an AI tool's signature/Gatekeeper, pin it
+            [--all] [--repin]    (trust-on-first-use), and scan config for injection
   hush fingerprint [--repin]     show/verify your identity fingerprint
   hush log [-n N]                show the access log (every decrypt attempt)
   hush doctor                    audit for leftover plaintext, git leaks, exposure
@@ -684,6 +811,7 @@ case "rebind": cmdRebind(args: Array(argv.dropFirst()))
 case "reconfig": cmdReconfig(args: Array(argv.dropFirst()))
 case "mcp": MCP.serve(args: Array(argv.dropFirst()))
 case "decoy": cmdDecoy(args: Array(argv.dropFirst()))
+case "verify-assistant", "verify": cmdVerifyAssistant(args: Array(argv.dropFirst()))
 case "log": cmdLog(args: Array(argv.dropFirst()))
 case "fingerprint", "fp": cmdFingerprint(args: Array(argv.dropFirst()))
 case "help", "-h", "--help", nil: print(help)

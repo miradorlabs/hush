@@ -221,6 +221,92 @@ Steer your assistant to use it (and never read `.env` directly) from your
 `CLAUDE.md` / agent config — and bind that config with `hush lock --bind-config`
 so the instruction itself can't be quietly rewritten.
 
+## Containing a compromised assistant
+
+Three layers for when the thing reading your project might be hostile (a prompt-
+injected agent, a tampered tool, a malicious dependency). None is a silver bullet;
+each removes one link from the kill chain, and they stack:
+
+### Sandboxed execution (`hush run --sandbox`)
+
+Run the command inside a macOS Seatbelt profile so that even with secrets in hand
+it can't write a persistent backdoor or move laterally:
+
+```sh
+hush run --sandbox -- npx @anthropic-ai/claude-code   # guard: blocks writes to
+                                                       # ~/.ssh, ~/.aws, ~/.kube,
+                                                       # ~/.gnupg, LaunchAgents, …
+hush run --sandbox=strict -- node agent.js            # deny-default: only the
+                                                       # project + temp are writable
+hush run --sandbox=strict --no-network -- ./tool      # also gate the network
+hush run --sandbox=strict --sandbox-allow ~/.cache/x -- ./tool   # widen the allowlist
+```
+
+- **`--sandbox` (guard):** allow-by-default, but deny writes to the persistence /
+  lateral-movement set (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.docker`,
+  LaunchAgents, shell rc files, `~/.hush`). Won't break a normal tool.
+- **`--sandbox=strict`:** deny-by-default writes; only the project, temp, and tool
+  caches are writable. Tighter, may need `--sandbox-allow PATH` for some tools.
+- **`--no-network`** gates the network for the run.
+
+Honest scope: this is **write-containment** (plus optional network gating), not an
+unescapable jail. `sandbox-exec` is deprecated-but-present in macOS, a kernel
+escape would defeat it, and it doesn't stop the process *reading* what it can
+reach or exfiltrating over an allowed network. It removes the persistence /
+lateral-movement half of an attack — the half the crypto and the gateway don't
+cover. The sandboxed process can still reach secrets through `hush mcp` (a normal
+child it spawns), so it isn't crippled.
+
+### Verify the assistant before you trust it (`hush verify-assistant`)
+
+Supply-chain check on the tools you let read your project:
+
+```sh
+hush verify-assistant --all          # check every known assistant installed
+hush verify-assistant cursor         # one by name
+hush init --verify-assistants        # pin the current state as a baseline at init
+```
+
+For signed apps it runs `codesign` + Gatekeeper and pins the signer identity
+(Team ID + leaf authority) **trust-on-first-use**; for JS CLIs (Claude Code,
+Copilot) it pins a content hash of the entrypoint. A later swap to a different
+signer, an unsigned build, or a changed CLI is flagged. It also scans your shell
+and AI-tool config for injection red flags (`PYTHONSTARTUP`, `NODE_OPTIONS
+--require`, `curl | sh`, a hook spawning a raw shell, …). Honest scope: there is
+no authoritative remote manifest to diff against, so "known-good" is what you
+pinned on a machine you trust; a root attacker who rewrites both the tool and the
+pin (`~/.hush/assistants.json`) defeats it. Re-pin a deliberate update with
+`--repin`.
+
+### Compartmentalize by assistant (least privilege)
+
+Give each agent only the credentials it needs, so one compromise isn't all of
+them:
+
+```sh
+hush lock .env.backend          # → .env.backend.hush (DATABASE_URL, DB_PASSWORD)
+hush lock .env.infra            # → .env.infra.hush   (AWS_*, only)
+
+hush run -f .env.backend -- npm run db:migrate     # bare name resolves to .hush
+hush run -f .env.infra -- terraform apply
+```
+
+`hush run -f .env.backend` resolves to the `.env.backend.hush` that
+`hush lock .env.backend` produced, and the access log records exactly which
+secret set each command used (e.g. `run "terraform apply" from .env.infra.hush
+[sandbox:strict] with secrets`), so a compromise of the backend agent never had
+the AWS keys in reach.
+
+### Stacking them
+
+```sh
+hush run --sandbox=strict -f .env.backend -- npx @anthropic-ai/claude-code
+```
+verified binary (out-of-band) → config bound (`--bind-config`) → only the backend
+secret set, fetched through `hush mcp` with Touch ID + audit → confined writes →
+every access logged. Each layer is detection or containment, not prevention; the
+point is that no single compromise silently gets everything.
+
 ## What this protects against — and what it doesn't
 
 Protects: plaintext secrets at rest. Accidental commits, cloud backups, other
