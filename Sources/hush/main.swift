@@ -1,19 +1,18 @@
 import Darwin
 import Foundation
 
-let defaultSecretsFile = ".hush"
-let identityDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hush", isDirectory: true)
-let identityFile = identityDir.appendingPathComponent("identity.json")
+// Shared global state (defaultSecretsFile, identityDir, identityFile,
+// mcpStdoutGuard) lives in Globals.swift — see the note there on why it must not
+// be declared in main.swift.
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("hush: \(message)\n".utf8))
     exit(1)
 }
 
-/// When the MCP gateway is serving, stdout carries only JSON-RPC frames, so any
-/// human-facing note must go to stderr instead (a stray stdout line corrupts the
-/// protocol stream).
-var mcpStdoutGuard = false
+/// Human-facing note. When the MCP gateway is serving (`mcpStdoutGuard`, declared
+/// in Globals.swift), stdout carries only JSON-RPC frames, so the note goes to
+/// stderr instead — a stray stdout line would corrupt the protocol stream.
 func note(_ message: String) {
     if mcpStdoutGuard {
         FileHandle.standardError.write(Data("hush: \(message)\n".utf8))
