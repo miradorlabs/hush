@@ -1,3 +1,11 @@
+```
+▐▄▄▌ ▐▄▄▌▐▄▄▌ ▐▄▄▌ ▐▄▄▄▄▄▄▌▐▄▄▌ ▐▄▄▌
+▐██▌ ▐██▌▐██▌ ▐██▌▐██▌     ▐██▌ ▐██▌
+▐███████▌▐██▌ ▐██▌ ▐█████▌ ▐███████▌
+▐▀▀▌ ▐▀▀▌▐▀▀▌ ▐▀▀      ▐▀▀▌▐▀▀▌ ▐▀▀▌
+▐▄▄▌ ▐▄▄▌ ▐▄▄▄▄▄▌ ▐▄▄▄▄▄▄▌ ▐▄▄▌ ▐▄▄▌
+```
+
 # Hush 🤫
 
 [![ci](https://github.com/miradorlabs/hush/actions/workflows/ci.yml/badge.svg)](https://github.com/miradorlabs/hush/actions/workflows/ci.yml)
@@ -83,7 +91,7 @@ brew install --build-from-source ./Formula/hush.rb
 ## Develop & test
 
 ```sh
-make test             # unit + exploit + fuzz tests (no Touch ID needed — 41 cases)
+make test             # unit + exploit + fuzz tests (no Touch ID needed — 90+ cases)
 make exploit          # drive the real binary through attacks it must refuse
 make demo             # installs, then runs the non-interactive walkthrough
 ```
@@ -148,6 +156,8 @@ hush decoy                    # write a fake .env wired to canary tokens
 hush log                      # show the access log (every decrypt attempt)
 hush doctor                   # audit: leftover plaintext, git leaks, exposure
 hush mcp                      # run the secrets gateway as an MCP (stdio) server
+hush run --sandbox -- cmd     # run a tool confined from ~/.ssh, ~/.aws, persistence
+hush verify-assistant --all   # check your AI tools' signatures + config for tampering
 ```
 
 Least-privilege and supply-chain guards on `run`:
@@ -223,9 +233,26 @@ so the instruction itself can't be quietly rewritten.
 
 ## Containing a compromised assistant
 
-Three layers for when the thing reading your project might be hostile (a prompt-
-injected agent, a tampered tool, a malicious dependency). None is a silver bullet;
-each removes one link from the kill chain, and they stack:
+For when the thing reading your project might be hostile (a prompt-injected agent,
+a tampered tool, a malicious dependency). None of these is a silver bullet; each
+removes one link from the kill chain, and they stack:
+
+```mermaid
+flowchart TB
+    A(["🤖 AI assistant reading your project<br/>(may be prompt-injected or tampered)"])
+    A --> V{"① verify-assistant<br/>signature + pin + config scan"}
+    V -->|"tampered / hook injected"| KO1["🛑 blocked before you trust it"]
+    V -->|ok| CB{"② config binding<br/>CLAUDE.md / agents unchanged?"}
+    CB -->|changed| KO2["🛑 decrypt refused + alert"]
+    CB -->|ok| SB["③ sandbox<br/>writes confined, network gated"]
+    SB --> GW{"④ secrets via hush mcp<br/>Touch ID + least-privilege + audit"}
+    GW -->|"denied key or host"| KO3["🛑 refused, logged"]
+    GW -->|approved| USE(["🔐 only the scoped secret set,<br/>every access logged"])
+    SB -. blocks persistence .-> NP["✓ no backdoor to ~/.ssh<br/>✓ no rewrite of ~/.aws"]
+```
+
+Each box below is one of those layers; the crypto + Secure Enclave underneath
+mean the secrets are never readable at rest regardless.
 
 ### Sandboxed execution (`hush run --sandbox`)
 
