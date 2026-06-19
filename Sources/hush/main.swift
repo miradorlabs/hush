@@ -1,17 +1,24 @@
 import Darwin
 import Foundation
 
-let defaultSecretsFile = ".hush"
-let identityDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hush", isDirectory: true)
-let identityFile = identityDir.appendingPathComponent("identity.json")
+// Shared global state (defaultSecretsFile, identityDir, identityFile,
+// mcpStdoutGuard) lives in Globals.swift — see the note there on why it must not
+// be declared in main.swift.
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("hush: \(message)\n".utf8))
     exit(1)
 }
 
+/// Human-facing note. When the MCP gateway is serving (`mcpStdoutGuard`, declared
+/// in Globals.swift), stdout carries only JSON-RPC frames, so the note goes to
+/// stderr instead — a stray stdout line would corrupt the protocol stream.
 func note(_ message: String) {
-    print("hush: \(message)")
+    if mcpStdoutGuard {
+        FileHandle.standardError.write(Data("hush: \(message)\n".utf8))
+    } else {
+        print("hush: \(message)")
+    }
 }
 
 // MARK: - Identity persistence
@@ -101,15 +108,22 @@ func resolvedDir(of path: String) -> String {
     return URL(fileURLWithPath: dir).resolvingSymlinksInPath().path
 }
 
-func decryptSecrets(_ path: String, action: String) -> Data {
+/// The throwing core of every secret read: location check, signature verify,
+/// config-integrity check, then the Secure Enclave open (Touch ID). It performs
+/// the same audit logging as before and throws `HushError` instead of exiting,
+/// so both the CLI (`decryptSecrets`, which maps a throw to `fail`) and the MCP
+/// gateway (which maps it to a JSON-RPC error) run the *one* security path.
+/// `reasonPrefix` overrides the Touch ID prompt text; the gateway passes a
+/// caller-specific reason ("Claude Code requested DATABASE_URL").
+func openSealedCore(path: String, action: String, reasonPrefix: String? = nil) throws -> Data {
     let sealed = loadSealed(path)
     guard let boundDir = sealed.directory else {
-        fail("\(path) has no location binding (older format) — re-create it with `hush lock`")
+        throw HushError("\(path) has no location binding (older format) — re-create it with `hush lock`")
     }
     let actualDir = resolvedDir(of: path)
     if actualDir != boundDir {
         AuditLog.record(.denyLocation, action: action, detail: "bound=\(boundDir) accessed=\(actualDir)")
-        fail("""
+        throw HushError("""
         location check failed — refusing to decrypt
           bound to:    \(boundDir)
           accessed at: \(actualDir)
@@ -121,7 +135,7 @@ func decryptSecrets(_ path: String, action: String) -> Data {
     // never gets to the decrypt step.
     guard HushCrypto.verify(sealed, identity: identity) else {
         AuditLog.record(.denyForgery, action: action, detail: boundDir)
-        fail("""
+        throw HushError("""
         signature check failed — refusing to decrypt \(path)
         this file was not sealed by this Mac's hush key (possible forgery or tampering).
         if it's an older unsigned file, re-create it with `hush lock`.
@@ -137,7 +151,7 @@ func decryptSecrets(_ path: String, action: String) -> Data {
         let current = ConfigBinding.fingerprint(root: boundDir, paths: watched)
         if current != storedConfig {
             AuditLog.record(.denyConfig, action: action, detail: "config changed under \(boundDir)")
-            fail("""
+            throw HushError("""
             config integrity check failed — refusing to decrypt \(path)
             the AI-tool config bound when this was sealed has changed since:
             \(ConfigBinding.describe(root: boundDir, paths: watched))
@@ -148,17 +162,23 @@ func decryptSecrets(_ path: String, action: String) -> Data {
         }
     }
     let requester = parentContext()
+    let reason = reasonPrefix.map { "\($0) in \(boundDir) — requested by \(requester)" }
+        ?? "\(action) in \(boundDir) — requested by \(requester)"
     do {
-        let plaintext = try HushCrypto.open(sealed, identity: identity,
-                                            reason: "\(action) in \(boundDir) — requested by \(requester)")
+        let plaintext = try HushCrypto.open(sealed, identity: identity, reason: reason)
         // Register values before logging so no secret can land in a log/alert.
         SecretScrub.register(DotEnv.parse(String(decoding: plaintext, as: UTF8.self)).map { $0.value })
         AuditLog.record(.ok, action: action, detail: "\(boundDir) (by \(requester))")
         return plaintext
     } catch {
         AuditLog.record(.denyAuth, action: action, detail: "\(boundDir) (by \(requester)): \(error)")
-        fail("\(error)")
+        throw error
     }
+}
+
+func decryptSecrets(_ path: String, action: String) -> Data {
+    do { return try openSealedCore(path: path, action: action) }
+    catch { fail("\(error)") }
 }
 
 // MARK: - Commands
@@ -629,6 +649,9 @@ usage:
   hush reconfig [-f f]           prompt → re-authorize config after a deliberate
                                  change (or add config binding to an existing file)
   hush decoy [--dns/--url/--aws] write a fake .env wired to canary tokens
+  hush mcp [--project DIR]       run the secrets gateway as an MCP (stdio) server:
+                                 your AI tool requests secrets through it instead
+                                 of reading .env — each request is Touch ID + logged
   hush fingerprint [--repin]     show/verify your identity fingerprint
   hush log [-n N]                show the access log (every decrypt attempt)
   hush doctor                    audit for leftover plaintext, git leaks, exposure
@@ -659,6 +682,7 @@ case "edit": cmdEdit(args: Array(argv.dropFirst()))
 case "unlock": cmdUnlock(args: Array(argv.dropFirst()))
 case "rebind": cmdRebind(args: Array(argv.dropFirst()))
 case "reconfig": cmdReconfig(args: Array(argv.dropFirst()))
+case "mcp": MCP.serve(args: Array(argv.dropFirst()))
 case "decoy": cmdDecoy(args: Array(argv.dropFirst()))
 case "log": cmdLog(args: Array(argv.dropFirst()))
 case "fingerprint", "fp": cmdFingerprint(args: Array(argv.dropFirst()))

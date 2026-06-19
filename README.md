@@ -147,6 +147,7 @@ hush reconfig                 # prompt → re-authorize AI-tool config after a c
 hush decoy                    # write a fake .env wired to canary tokens
 hush log                      # show the access log (every decrypt attempt)
 hush doctor                   # audit: leftover plaintext, git leaks, exposure
+hush mcp                      # run the secrets gateway as an MCP (stdio) server
 ```
 
 Least-privilege and supply-chain guards on `run`:
@@ -167,6 +168,58 @@ environment, and `exec`s your command — the plaintext never touches disk.
 
 For multiple environments: `hush lock .env.production` produces
 `.env.production.hush`, then `hush run -f .env.production.hush -- ...`.
+
+## Secrets gateway (MCP)
+
+`hush mcp` runs a secrets gateway as an [MCP](https://modelcontextprotocol.io)
+stdio server. Instead of your AI tool reading `.env` (or `.hush`) off disk, it
+requests secrets through tools, and every request runs the full hush check path
+(location + signature + config binding) plus a Touch ID prompt that names the
+caller and the key. Point your tool's MCP config at it, with the project as the
+working directory:
+
+```jsonc
+// e.g. .mcp.json / Claude Code / Cursor MCP config
+{
+  "mcpServers": {
+    "hush": { "command": "hush", "args": ["mcp", "--project", "/abs/path/to/project"] }
+  }
+}
+```
+
+Tools it exposes:
+
+- `list_secrets` — the key *names* only, never values.
+- `get_secret(name)` — one value, Touch ID + audited, subject to policy.
+- `http_request(url, headers, body)` — header/body may contain `{{secret:NAME}}`
+  placeholders that hush fills in **server-side** for the request, so the value
+  is used without ever entering the model's context. Only hosts you allowlist
+  are permitted.
+
+Least-privilege via a project-local `.hushmcp.json` (an agent that only needs
+the database never gets your AWS keys):
+
+```json
+{
+  "allow": ["DATABASE_URL", "DB_*"],
+  "deny":  ["AWS_*", "STRIPE_*"],
+  "http_allow_hosts": ["api.stripe.com", "*.internal.example"]
+}
+```
+
+**Honest scope.** Once `get_secret` returns a value, the (possibly compromised)
+assistant holds it — the gateway does not make exfiltration impossible. What it
+gives you is per-access **consent you can see** (the Touch ID prompt names the
+key), a complete **audit trail** (`hush log`), **least-privilege** scoping so a
+compromised agent can't grab the whole set, and the `http_request` path where a
+secret is *used* for a call but never enters the model context and can only go to
+a host you pre-approved. It is consent + detection + blast-radius reduction, in
+the same spirit as the rest of hush — not a claim that a hijacked assistant can
+never leak a secret.
+
+Steer your assistant to use it (and never read `.env` directly) from your
+`CLAUDE.md` / agent config — and bind that config with `hush lock --bind-config`
+so the instruction itself can't be quietly rewritten.
 
 ## What this protects against — and what it doesn't
 

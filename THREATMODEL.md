@@ -72,6 +72,8 @@ intended review surface.
 | Decoy carries no real secret | Generated fakes + marker | `test_decoy_containsNoRealSecret` |
 | Alerts/logs can't leak the secret | Value scrubbing | `test_alertCannotLeakSecret` |
 | Tampered AI-tool config is detected (opt-in) | Signed config fingerprint, re-checked pre-prompt | `test_configModification_detected`, `test_configFingerprintTamper_breaksSignature`, `test_configStripDowngrade_rejected` |
+| MCP gateway enforces least-privilege | `.hushmcp.json` allow/deny + host allowlist, checked before decrypt | `GatewayPolicyTests`, `testGetSecretDeniedByPolicyNeverDecrypts`, `testHttpRequestToUnallowlistedHostRefused` |
+| Secret usable for a request without entering model context | Server-side `{{secret:NAME}}` substitution in `http_request` | `SecretTemplatingTests` |
 
 `tests/exploits.sh` re-runs the file-forgery, relocation, downgrade, guard, and
 interposition attacks against the actual installed binary.
@@ -87,6 +89,16 @@ interposition attacks against the actual installed binary.
   `hush reconfig` re-authorizes a deliberate change. It cannot stop config you
   approve, and a same-user attacker who also runs `hush reconfig` defeats it; it
   closes the *silent* swap.
+- **MCP secrets gateway** (`hush mcp`) — your AI tool requests secrets through a
+  stdio MCP server instead of reading `.env` directly. Each request runs the full
+  check path and a Touch ID prompt naming the caller and key, is audited, and is
+  scoped by a least-privilege `.hushmcp.json` (key allow/deny + host allowlist).
+  The `http_request` tool *uses* a secret for a network call via server-side
+  `{{secret:NAME}}` substitution, so the value never enters the model context and
+  can only reach an allowlisted host. This is consent + detection + scoping: once
+  a secret is returned to the assistant it is held by the assistant, so a
+  compromised assistant that legitimately requests it can still leak it (see
+  non-goal 1). The gain is that nothing is silent and the blast radius is bounded.
 - **Honeytoken decoy** — bait `.env` wired to canary tokens; turns an
   exfiltration into an alert.
 - **`--watch`/`--redact`** — supervises a running app and alerts/redacts if a

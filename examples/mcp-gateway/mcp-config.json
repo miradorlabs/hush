@@ -1,0 +1,9 @@
+{
+  "//": "Sample MCP server config. Paste the mcpServers entry into your AI tool's MCP config (Claude Code: .mcp.json; Cursor: ~/.cursor/mcp.json) and replace the --project path with this directory's ABSOLUTE path.",
+  "mcpServers": {
+    "hush": {
+      "command": "hush",
+      "args": ["mcp", "--project", "/ABSOLUTE/PATH/TO/hush/examples/mcp-gateway"]
+    }
+  }
+}
