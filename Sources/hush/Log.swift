@@ -53,13 +53,14 @@ enum AuditLog {
         case denyAuth = "DENY-AUTH" // user cancelled or auth failed
         case denyForgery = "DENY-FORGERY" // signature check failed
         case denyLocation = "DENY-LOCATION" // bound to a different directory
+        case denyConfig = "DENY-CONFIG" // AI-tool config changed since seal
         case blocked = "BLOCK"      // a guard (e.g. package manager) stopped it
         case exposure = "EXPOSURE"  // a secret value leaked into a running app's output
 
         /// Only the genuine anomalies notify — not your own cancels or routine ops.
         var alerts: Bool {
             switch self {
-            case .exposure, .denyForgery, .denyLocation: return true
+            case .exposure, .denyForgery, .denyLocation, .denyConfig: return true
             case .ok, .sealed, .denyAuth, .blocked: return false
             }
         }
@@ -69,6 +70,7 @@ enum AuditLog {
             case .exposure: return "secret exposed in output"
             case .denyForgery: return "forged/tampered .hush blocked"
             case .denyLocation: return "secrets accessed from wrong location"
+            case .denyConfig: return "AI-tool config changed since seal"
             default: return rawValue
             }
         }

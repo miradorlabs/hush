@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 First release in preparation; everything below will ship as `0.1.0` once tagged.
 
 ### Added
+- **Config File Integrity Binding** (`hush lock --bind-config`, `hush reconfig`):
+  optionally fingerprint the AI-tool config surface (`CLAUDE.md`, `AGENTS.md`,
+  `.claude/agents`, `.claude/commands`, `.cursor` rules, `.vscode/settings.json`
+  and `tasks.json`, Copilot instructions) and bind it into the sealed file,
+  signed by the Secure Enclave. Every decrypt re-checks the config before the
+  Touch ID prompt and refuses, with an alert, if it changed since the seal, the
+  signal of a prompt-injection that turns your own assistant into the
+  exfiltrator. `hush reconfig` re-authorizes a deliberate change (Touch ID), and
+  `hush doctor` reports binding status. Opt-in, fully backward compatible.
 - Core: encrypt a project's `.env` into a `.hush` file sealed to the Secure
   Enclave; `init`, `lock`, `run`, `show`, `edit`, `unlock`.
 - Per-access user-presence approval (Touch ID / account password / Apple Watch)

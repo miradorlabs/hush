@@ -127,6 +127,26 @@ func decryptSecrets(_ path: String, action: String) -> Data {
         if it's an older unsigned file, re-create it with `hush lock`.
         """)
     }
+    // Config File Integrity Binding: if this file was sealed with a config
+    // fingerprint, the AI-tool config it was bound to must be byte-identical now.
+    // The stored fingerprint is authentic (the signature above just passed), so a
+    // mismatch means the config — not the .hush — changed since the seal. Refuse
+    // before the prompt, exactly like the location check.
+    if let storedConfig = sealed.configFingerprint {
+        let watched = sealed.configPaths ?? []
+        let current = ConfigBinding.fingerprint(root: boundDir, paths: watched)
+        if current != storedConfig {
+            AuditLog.record(.denyConfig, action: action, detail: "config changed under \(boundDir)")
+            fail("""
+            config integrity check failed — refusing to decrypt \(path)
+            the AI-tool config bound when this was sealed has changed since:
+            \(ConfigBinding.describe(root: boundDir, paths: watched))
+            a changed CLAUDE.md / agent / cursor rule / VS Code task is how a
+            prompt-injection turns your own assistant into the exfiltrator.
+            if you changed it on purpose, re-authorize with `hush reconfig` (Touch ID).
+            """)
+        }
+    }
     let requester = parentContext()
     do {
         let plaintext = try HushCrypto.open(sealed, identity: identity,
@@ -173,12 +193,16 @@ func cmdLock(args: [String]) {
     var output: String?
     var removePlaintext = false
     var leaveDecoy = false
+    var bindConfig = false
+    var extraConfigPaths: [String] = []
     var it = args.makeIterator()
     while let arg = it.next() {
         switch arg {
         case "-o", "--output": output = it.next()
         case "--rm": removePlaintext = true
         case "--decoy": leaveDecoy = true; removePlaintext = true
+        case "--bind-config": bindConfig = true
+        case "--config-path": if let v = it.next() { extraConfigPaths.append(v); bindConfig = true }
         default: input = arg
         }
     }
@@ -192,13 +216,24 @@ func cmdLock(args: [String]) {
     }
     let identity = loadIdentity()
     let boundDir = resolvedDir(of: out)
+    var config: (paths: [String], fingerprint: Data)?
+    if bindConfig {
+        let paths = Array(Set(ConfigBinding.defaultPaths + extraConfigPaths)).sorted()
+        do { try ConfigBinding.validate(paths) } catch { fail("\(error)") }
+        config = (paths, ConfigBinding.fingerprint(root: boundDir, paths: paths))
+    }
     do {
         let sealed = try HushCrypto.seal(plaintext, identity: identity, directory: boundDir,
-                                         reason: "seal secrets for \(boundDir)")
+                                         config: config, reason: "seal secrets for \(boundDir)")
         try sealed.serialize().write(toFile: out, atomically: true, encoding: .utf8)
     } catch { fail("\(error)") }
     AuditLog.record(.sealed, action: "lock \(input) → \(out)", detail: boundDir)
     note("locked \(input) → \(out) (bound to \(boundDir))")
+    if let config {
+        note("config-bound to \(config.paths.count) AI-tool config paths — decrypt refuses if any change:")
+        note("\n\(ConfigBinding.describe(root: boundDir, paths: config.paths))")
+        note("re-authorize a deliberate config change with `hush reconfig`")
+    }
     if removePlaintext {
         // Best-effort overwrite before unlinking. NOT a guaranteed erase on SSD
         // (wear-leveling / APFS copy-on-write may keep the old blocks); if this
@@ -439,6 +474,57 @@ func cmdRebind(args: [String]) {
     note("rebound \(file): \(oldDir) → \(newDir)")
 }
 
+/// Re-authorize the AI-tool config a sealed file is bound to, after a change you
+/// made on purpose. Decrypts (Touch ID — so the re-authorization is something you
+/// see and approve) and re-seals with the current config fingerprint. Also the
+/// way to *add* config binding to a file that didn't have it, without the
+/// original `.env`.
+func cmdReconfig(args: [String]) {
+    var file = defaultSecretsFile
+    var extraConfigPaths: [String] = []
+    var it = args.makeIterator()
+    while let arg = it.next() {
+        switch arg {
+        case "-f", "--file": if let v = it.next() { file = v }
+        case "--config-path": if let v = it.next() { extraConfigPaths.append(v) }
+        default: fail("unknown argument \(arg)")
+        }
+    }
+    let sealed = loadSealed(file)
+    guard let dir = sealed.directory else {
+        fail("\(file) has no location binding — re-create it with `hush lock`")
+    }
+    let actualDir = resolvedDir(of: file)
+    if actualDir != dir {
+        fail("""
+        location check failed — refusing to re-bind config
+          bound to:    \(dir)
+          accessed at: \(actualDir)
+        if you moved this project on purpose, run `hush rebind` first
+        """)
+    }
+    let identity = loadIdentity()
+    guard HushCrypto.verify(sealed, identity: identity) else {
+        fail("signature check failed — \(file) was not sealed by this Mac's hush key; re-create it with `hush lock`")
+    }
+    // Keep the paths the file was already bound to; otherwise start from the
+    // defaults. `--config-path` adds to whichever set applies.
+    let base = sealed.configPaths ?? ConfigBinding.defaultPaths
+    let paths = Array(Set(base + extraConfigPaths)).sorted()
+    do { try ConfigBinding.validate(paths) } catch { fail("\(error)") }
+    let fingerprint = ConfigBinding.fingerprint(root: dir, paths: paths)
+    do {
+        let plaintext = try HushCrypto.open(sealed, identity: identity,
+                                            reason: "RE-AUTHORIZE AI-tool config for secrets in \(dir)")
+        let resealed = try HushCrypto.seal(plaintext, identity: identity, directory: dir,
+                                           config: (paths, fingerprint), reason: "re-seal secrets for \(dir)")
+        try resealed.serialize().write(toFile: file, atomically: true, encoding: .utf8)
+    } catch { fail("\(error)") }
+    AuditLog.record(.sealed, action: "reconfig \(file)", detail: dir)
+    note("re-authorized config binding for \(file) (\(paths.count) paths):")
+    note("\n\(ConfigBinding.describe(root: dir, paths: paths))")
+}
+
 func cmdDecoy(args: [String]) {
     var output = ".env"
     var canaries = Decoy.Canaries()
@@ -529,7 +615,9 @@ usage:
   hush init [--biometry-only]    one-time: create a Secure Enclave key
                                  (--biometry-only: fingerprint only, no password fallback)
   hush lock [.env] [--rm]        prompt → encrypt + sign .env → .hush
-            [--decoy] [-o f]     (--decoy: leave a honeytoken .env behind)
+            [--decoy] [-o f]     (--decoy: leave a honeytoken .env behind;
+            [--bind-config]       --bind-config: also bind the AI-tool config so
+                                  decrypt refuses if CLAUDE.md/agents/rules change)
   hush run [-f f] [--only K1,K2] prompt → inject secrets as env vars → exec cmd
            [--watch] [--redact]  (--only: subset; --watch: alert if a secret
            [--allow-pkg] -- cmd   leaks into output; --redact: mask it too.
@@ -538,6 +626,8 @@ usage:
   hush edit [-f f]               prompt → edit in $EDITOR → re-encrypt
   hush unlock [-f f] [-o f]      prompt → write plaintext back out (escape hatch)
   hush rebind [-f f]             prompt → re-bind secrets after moving a project
+  hush reconfig [-f f]           prompt → re-authorize config after a deliberate
+                                 change (or add config binding to an existing file)
   hush decoy [--dns/--url/--aws] write a fake .env wired to canary tokens
   hush fingerprint [--repin]     show/verify your identity fingerprint
   hush log [-n N]                show the access log (every decrypt attempt)
@@ -568,6 +658,7 @@ case "show": cmdShow(args: Array(argv.dropFirst()))
 case "edit": cmdEdit(args: Array(argv.dropFirst()))
 case "unlock": cmdUnlock(args: Array(argv.dropFirst()))
 case "rebind": cmdRebind(args: Array(argv.dropFirst()))
+case "reconfig": cmdReconfig(args: Array(argv.dropFirst()))
 case "decoy": cmdDecoy(args: Array(argv.dropFirst()))
 case "log": cmdLog(args: Array(argv.dropFirst()))
 case "fingerprint", "fp": cmdFingerprint(args: Array(argv.dropFirst()))

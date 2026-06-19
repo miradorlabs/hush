@@ -101,6 +101,17 @@ enum Doctor {
                 } else {
                     bad("\(f) has no location binding (older format)", fix: "re-create it with `hush lock`")
                 }
+                // Config File Integrity Binding status (only reported when set).
+                if let storedConfig = sealed.configFingerprint {
+                    let watched = sealed.configPaths ?? []
+                    let current = ConfigBinding.fingerprint(root: resolvedDir(of: f), paths: watched)
+                    if current == storedConfig {
+                        ok("\(f) AI-tool config binding matches (\(watched.count) paths)")
+                    } else {
+                        bad("\(f) AI-tool config changed since it was sealed",
+                            fix: "inspect the bound config (CLAUDE.md/.claude/.cursor/.vscode); if the change was intended, run `hush reconfig -f \(f)`")
+                    }
+                }
             }
         }
 

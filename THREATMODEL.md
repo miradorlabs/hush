@@ -71,12 +71,22 @@ intended review surface.
 | Key-material swap is detected | Keychain-pinned fingerprint | `test_keySwap_changesFingerprint` |
 | Decoy carries no real secret | Generated fakes + marker | `test_decoy_containsNoRealSecret` |
 | Alerts/logs can't leak the secret | Value scrubbing | `test_alertCannotLeakSecret` |
+| Tampered AI-tool config is detected (opt-in) | Signed config fingerprint, re-checked pre-prompt | `test_configModification_detected`, `test_configFingerprintTamper_breaksSignature`, `test_configStripDowngrade_rejected` |
 
 `tests/exploits.sh` re-runs the file-forgery, relocation, downgrade, guard, and
 interposition attacks against the actual installed binary.
 
 ## Defense-in-depth (detection, not prevention)
 
+- **Config File Integrity Binding** (opt-in, `hush lock --bind-config`) — binds a
+  signed fingerprint of the AI-tool config (`CLAUDE.md`, `.claude/agents`,
+  `.cursor` rules, `.vscode` tasks, Copilot instructions) into the sealed file.
+  Decrypt recomputes it before the prompt and refuses, with an alert, on any
+  change, so a prompt-injection that rewrites your own assistant's instructions
+  to exfiltrate `.env` is caught instead of silently riding your next approval.
+  `hush reconfig` re-authorizes a deliberate change. It cannot stop config you
+  approve, and a same-user attacker who also runs `hush reconfig` defeats it; it
+  closes the *silent* swap.
 - **Honeytoken decoy** — bait `.env` wired to canary tokens; turns an
   exfiltration into an alert.
 - **`--watch`/`--redact`** — supervises a running app and alerts/redacts if a
