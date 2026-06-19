@@ -103,7 +103,7 @@ asserts the attack is refused — so a future change that weakens a guarantee
 fails the build. Two layers:
 
 - **`Tests/hushTests/ExploitTests.swift`** (in `make test`) — unit-level
-  attacks: at-rest read yields only ciphertext (CVE-2025-55284 class), the
+  attacks: at-rest read yields only ciphertext, the
   substitution forgery (knowing the public key isn't enough), signature-strip
   downgrade, ciphertext tamper, exfil-by-relocation, header-forge to fake the
   location, supply-chain install scrape, wrapper/PATH interposition, key-swap
@@ -231,8 +231,9 @@ so you're not surprised:
   tools are steered by in-repo config (`CLAUDE.md`, `.claude/agents`, `.cursor`
   rules, `.vscode/tasks.json`, Copilot instructions). A prompt-injection or a
   malicious commit that rewrites one of these can turn your own assistant into
-  the exfiltrator: it reads `.env` (which it is allowed to) and ships it out, the
-  CVE-2025-55284 shape with the instruction living in a file you trust. With
+  the exfiltrator: it reads `.env` (which it is allowed to) and ships it out. The
+  injected instruction just lives in a file you trust rather than in the agent's
+  input. With
   `--bind-config`, hush fingerprints that config surface and binds the
   fingerprint into the sealed file, signed by the Secure Enclave so it cannot be
   edited to match a tampered config. Every later decrypt recomputes it before the
@@ -244,7 +245,7 @@ so you're not surprised:
   config like `.vscode/settings.json` changes often and a check that fired on
   every benign edit would just train you to bypass it.
 - **Honeytoken decoy** (`hush lock --decoy`, `hush decoy`): leaves a believable
-  fake `.env` where the real one was. The recent CVE-2025-55284 class of attack
+  fake `.env` where the real one was. A common class of attack
   is "prompt-inject an agent → it reads `.env` → exfiltrates it"; the npm/MCP
   supply-chain scanners do the same from post-install scripts. A decoy turns
   that read into a **tripwire** — wire its values to canary tokens
