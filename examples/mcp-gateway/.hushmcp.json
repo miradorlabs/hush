@@ -1,0 +1,5 @@
+{
+  "allow": ["DATABASE_URL", "API_KEY", "STRIPE_*"],
+  "deny": ["STRIPE_SECRET_KEY"],
+  "http_allow_hosts": ["api.github.com"]
+}

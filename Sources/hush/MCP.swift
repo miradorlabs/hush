@@ -190,7 +190,7 @@ enum MCP {
             let policy = GatewayPolicy.load(projectDir: projectDir)
             guard policy.allowsHost(host) else {
                 AuditLog.record(.blocked, action: "MCP http_request \(method) \(host)", detail: "host not in http_allow_hosts")
-                return Self.toolError("policy denies sending secrets to \(host); add it to \"http_allow_hosts\" in .hushmcp.json")
+                return Self.toolError("policy denies sending secrets to \(host); add it to 'http_allow_hosts' in .hushmcp.json")
             }
             // Which secrets does this request reference, and are they all allowed?
             let referenced = Set(headers.values.flatMap(SecretTemplating.referencedNames) + (body.map(SecretTemplating.referencedNames) ?? []))
