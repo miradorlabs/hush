@@ -305,6 +305,40 @@ pinned on a machine you trust; a root attacker who rewrites both the tool and th
 pin (`~/.hush/assistants.json`) defeats it. Re-pin a deliberate update with
 `--repin`.
 
+Beyond the binary, it pins and content-scans your repo's **instruction surface**
+— `CLAUDE.md`, agents, rules — for prompt-injection shapes (hidden/zero-width
+Unicode, "ignore previous instructions", fetch-and-run, oversized encoded blobs),
+so a persistent injection planted in your own assistant's instructions is flagged.
+
+### Gate the launch (`hush guard`)
+
+Wrap your assistant so it only starts if nothing is tampered or injection-flagged:
+
+```sh
+hush guard -- claude            # verify binary + instruction surface, then exec claude
+hush guard --repin -- claude    # accept a deliberate change as the new baseline, then launch
+hush guard --force -- claude    # launch despite findings (audited)
+```
+
+`guard` runs the checks above against the exact binary it's about to launch and
+**refuses to exec** on any integrity/injection issue.
+
+For **mid-session** coverage, run it as a Claude Code hook:
+
+```sh
+hush guard --print-hook-config   # prints the settings.json snippet to wire it up
+```
+
+Once wired, Claude Code invokes `hush guard --hook` on each event: it re-checks the
+instruction surface before every tool (and **blocks** the tool/session if a
+`CLAUDE.md`/agent/rule changed *during* the session), and scans fetched pages, tool
+results, and prompts for injection markers, feeding the model a caution to treat
+that text as untrusted data. This is heuristic and partial — a `PostToolUse`
+caution flags content already shown, and a cleverly-worded injection can slip the
+scan — so the robust layer is still containment: the per-access Touch ID on `hush
+mcp`, leak-watching with `--watch`, and write/egress confinement with
+`--sandbox`/`--no-network`. See `THREATMODEL.md` (non-goal 8).
+
 ### Compartmentalize by assistant (least privilege)
 
 Give each agent only the credentials it needs, so one compromise isn't all of

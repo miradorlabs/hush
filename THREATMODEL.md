@@ -103,6 +103,31 @@ interposition attacks against the actual installed binary.
   a trust-on-first-use signer pin (content-hash pin for JS CLIs) plus a config
   injection scan, so a swapped/tampered tool or an injected startup hook is caught
   before you trust it with secrets. Tamper-evident, not tamper-proof (non-goal 4).
+  It also TOFU-pins the in-repo *instruction surface* (the same paths
+  `--bind-config` covers) and content-scans those files for prompt-injection
+  shapes — hidden/zero-width Unicode, instruction-override phrasing, fetch-and-run,
+  oversized encoded blobs — so a persistent injection planted in `CLAUDE.md` / an
+  agent / a rule is flagged even when no `.hush` is bound. The content scan is a
+  deliberately conservative heuristic (a second pair of eyes that explains *why* a
+  changed file looks hostile); the pin is the authoritative tamper signal.
+- **Preflight gate** (`hush guard -- <cmd>`, e.g. `hush guard -- claude`) — runs
+  the full `verify-assistant` battery against the exact binary it's about to launch
+  *plus* the instruction-surface pin/scan and the shell/AI-config scan, and refuses
+  to `exec` the tool if anything is tampered or injection-flagged (`--repin` to
+  accept a deliberate change, `--force` to launch anyway, both logged). Use it to
+  wrap your assistant's launch. The bare gate is preflight only; for *mid-session*
+  coverage it has a hook mode (next bullet).
+- **Runtime hook** (`hush guard --hook`, wired via `--print-hook-config`) — invoked
+  by Claude Code on each event. On every call it re-verifies the instruction
+  surface and **blocks** (exit 2, honoured for `PreToolUse` / `SessionStart` /
+  `UserPromptSubmit`) if it drifted since you pinned it, catching an injection that
+  rewrites `CLAUDE.md` *during* the session; and it scans the content each event
+  carries (a fetched page's text, a tool result, the prompt) for injection markers,
+  feeding back a **caution** (`additionalContext`) that tells the model to treat
+  that text as untrusted data. Heuristic and partial by nature (see non-goal 8): a
+  `PostToolUse` caution can flag fetched content but cannot un-show it, and the
+  content scan is conservative. It narrows the mid-session gap; it does not close
+  it — containment (below) is still the robust layer.
 - **Compartmentalization** — per-assistant secret sets (`hush lock .env.backend`
   → `hush run -f .env.backend`); the audit log names the set each agent used, so a
   single compromise has a bounded blast radius.
@@ -146,6 +171,19 @@ hush does **not** defend against:
    (unless `--no-network`) network egress, and `strict` necessarily allows writes
    to the project and tool caches. It bounds persistence/lateral-movement, not
    data exfiltration.
+8. **Live (mid-session) prompt injection — only heuristically.** The bare
+   `verify-assistant` / `guard` checks detect injection *persisted on disk*,
+   verified before launch, with no view into the model's context window. The
+   `guard --hook` mode narrows this — it re-checks instruction-surface integrity on
+   every tool call (blocking on drift) and scans fetched content / tool results /
+   prompts for injection markers (cautioning the model) — but it is a *heuristic*,
+   not a guarantee: a clever injection (paraphrased, encoded, in another language)
+   slips the content scan, and a `PostToolUse` caution flags content that was
+   already shown to the model. General prompt-injection detection is an unsolved
+   problem; hush does not claim to solve it. The robust answer remains containment:
+   the secret stays behind a per-access Touch ID prompt (`hush mcp`), output is
+   watched for leaks (`--watch`), and writes/egress are confined (`--sandbox`,
+   `--no-network`).
 
 ## Verifying these claims
 

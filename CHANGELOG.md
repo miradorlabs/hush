@@ -18,7 +18,23 @@ First release in preparation; everything below will ship as `0.1.0` once tagged.
 - **Assistant verification** (`hush verify-assistant`, `hush init
   --verify-assistants`): codesign + Gatekeeper checks with a trust-on-first-use
   signer pin (content-hash pin for JS CLIs like Claude Code/Copilot), plus a scan
-  of shell and AI-tool config for injection red flags.
+  of shell and AI-tool config for injection red flags. It also TOFU-pins the repo's
+  AI *instruction surface* (`CLAUDE.md`, agents, rules, …) and content-scans those
+  files for prompt-injection shapes — hidden/zero-width Unicode, instruction-
+  override phrasing, fetch-and-run, oversized encoded blobs — catching a persistent
+  injection planted in your own assistant's instructions even with no `.hush` bound.
+- **Preflight gate** (`hush guard -- <cmd>`, e.g. `hush guard -- claude`): runs the
+  full assistant + instruction-surface + config checks against the exact binary
+  it's about to launch, and refuses to `exec` it if anything is tampered or
+  injection-flagged (`--repin` to accept a deliberate change, `--force` to launch
+  anyway; both audited).
+- **Runtime hook** (`hush guard --hook`, wired via `hush guard --print-hook-config`):
+  invoked by Claude Code per event for *mid-session* coverage — re-checks the
+  instruction surface on every tool call and blocks (exit 2) on drift, and scans
+  fetched pages / tool results / prompts for injection markers, cautioning the model
+  to treat that text as untrusted data. Heuristic and partial by design (a
+  `PostToolUse` caution can't un-show content); containment remains the robust
+  layer. See THREATMODEL.md non-goal 8.
 - **Compartmentalization ergonomics**: `hush run -f .env.backend` resolves to the
   `.env.backend.hush` produced by `hush lock .env.backend`, and the access log now
   names which secret set (and any sandbox) each run used.

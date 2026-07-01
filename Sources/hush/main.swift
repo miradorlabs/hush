@@ -716,6 +716,22 @@ func runAssistantVerification(targets: [String], explicit: Bool, repin: Bool) ->
         problems += findings.count
         AuditLog.record(.denyForgery, action: "verify-assistant config scan", detail: "\(findings.count) red flag(s)")
     }
+
+    // The in-repo instruction surface (CLAUDE.md / agents / rules): pin it
+    // trust-on-first-use so a silent edit is caught, and scan each file for
+    // prompt-injection shapes. This is the file-tampering half of "prompt
+    // injection" — the half hush can actually see.
+    let (instrPin, instrFindings) = AssistantVerify.verifyInstructionSurface(projectDir: cwd, repin: repin)
+    print("instruction-surface (CLAUDE.md / agents / rules):")
+    print("    \(instrPin.ok ? "✓" : "✗") \(instrPin.name): \(instrPin.detail)")
+    if !instrPin.ok { problems += 1 }
+    if instrFindings.isEmpty {
+        print("    ✓ no injection red flags in instruction files")
+    } else {
+        for f in instrFindings { print("    ✗ \(f.location): \(f.issue)") }
+        problems += instrFindings.count
+        AuditLog.record(.denyForgery, action: "verify-assistant instruction scan", detail: "\(instrFindings.count) red flag(s)")
+    }
     return problems
 }
 
@@ -746,6 +762,164 @@ func cmdVerifyAssistant(args: [String]) {
     let explicit = !all && !targets.isEmpty
     exit(runAssistantVerification(targets: targets, explicit: explicit, repin: repin) == 0 ? 0 : 1)
 }
+
+/// `hush guard -- <cmd> [args...]` — a preflight gate: run the full
+/// `verify-assistant` battery against the tool you're about to launch (signature
+/// / content-hash pin), plus the instruction-surface pin + injection scan and the
+/// shell/AI-config scan, and **refuse to exec** if anything is tampered or
+/// flagged. Clean → exec the command (no secrets injected; that still goes through
+/// `hush run` / `hush mcp`). This catches tampering and *persistent* prompt
+/// injection planted on disk before the session starts; it cannot see content the
+/// agent fetches mid-session — for that, see THREATMODEL.md.
+func cmdGuard(args: [String]) {
+    var repin = false
+    var force = false
+    var hook = false
+    var printHookConfig = false
+    var rest = args
+    loop: while let first = rest.first {
+        switch first {
+        case "--repin": repin = true; rest.removeFirst()
+        case "--force": force = true; rest.removeFirst()
+        case "--hook": hook = true; rest.removeFirst()
+        case "--print-hook-config": printHookConfig = true; rest.removeFirst()
+        case "-h", "--help":
+            print("""
+            hush guard [--repin] [--force] -- <command> [args...]
+            hush guard --hook                  (run as a Claude Code hook; reads stdin)
+            hush guard --print-hook-config     (print the settings.json snippet to wire it up)
+
+            Verify an AI tool and your repo's instruction surface, then launch the
+            command only if nothing is tampered or injection-flagged. Use it to
+            wrap your assistant, e.g. `hush guard -- claude`.
+              --repin   accept the current state as the new pinned baseline, then launch
+              --force   launch even if checks fail (logged)
+              --hook    runtime mode: invoked by Claude Code per event — re-checks the
+                        instruction surface (blocks on change) and scans the content the
+                        agent just handled for injection markers (cautions the model)
+            """)
+            return
+        case "--": rest.removeFirst(); break loop
+        default: break loop
+        }
+    }
+    if printHookConfig { print(hookConfigSnippet); return }
+    if hook { runGuardHook() }  // reads stdin, never returns
+    guard !rest.isEmpty else { fail("usage: hush guard [--repin] [--force] -- <command> [args...]") }
+
+    // Resolve to an absolute, non-interposable binary FIRST (same as `run`), so we
+    // verify and launch the *exact same file* — a PATH/wrapper middleman can't slip
+    // in between the check and the launch, and the verifier sees a real path rather
+    // than a bare name it might not recognise.
+    let (resolution, fatal) = CommandResolver.resolve(rest[0], allowUnsafe: false)
+    if let fatal {
+        AuditLog.record(.blocked, action: "guard \(rest.joined(separator: " "))", detail: "unsafe command path")
+        fail(fatal)
+    }
+    let exePath = resolution!.path
+    for w in resolution!.warnings { note("warning: \(w)") }
+
+    // Verify that exact binary, plus the instruction surface and shell/AI config
+    // (runAssistantVerification scans both regardless of the named target).
+    let problems = runAssistantVerification(targets: [exePath], explicit: true, repin: repin)
+    if problems > 0 && !force {
+        AuditLog.record(.blocked, action: "guard \(rest.joined(separator: " "))", detail: "\(problems) integrity/injection issue(s)")
+        fail("""
+        refusing to launch \(rest[0]): \(problems) integrity/injection issue(s) above.
+        if you made the change on purpose, re-run with --repin to accept the new baseline;
+        to launch anyway this once, re-run with --force.
+        """)
+    }
+    if problems > 0 { note("launching despite \(problems) issue(s) (--force)") }
+
+    var argv: [UnsafeMutablePointer<CChar>?] = rest.map { strdup($0) }
+    argv.append(nil)
+    execv(exePath, &argv)
+    fail("could not exec \(exePath): \(String(cString: strerror(errno)))")
+}
+
+/// `hush guard --hook` — runtime mode, invoked *by* Claude Code on each hook event
+/// (not by you directly). It reads the event JSON on stdin and, on every call,
+/// (1) re-verifies the in-repo instruction surface and **blocks** (exit 2, which
+/// Claude Code honours for PreToolUse / SessionStart / UserPromptSubmit) if it
+/// changed since you pinned it — catching a persistent injection written *during*
+/// the session; and (2) scans the content the event carries (a fetched page, a
+/// tool result, the prompt) for injection markers and feeds back a **caution**
+/// (`additionalContext`) telling the model to treat that text as untrusted data.
+/// Never re-pins — that would defeat detection. See `--print-hook-config`.
+func runGuardHook() -> Never {
+    // A hook payload is a single JSON object on stdin (not the newline-delimited
+    // stream the MCP gateway speaks), so read to EOF and parse once.
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    let obj = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any]) ?? [:]
+    let event = (obj["hook_event_name"] as? String) ?? ""
+    let projectDir = (obj["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
+
+    // 1) Instruction-surface integrity. repin:false always — a hook that re-pinned
+    //    would silently bless whatever just changed.
+    let (pin, _) = AssistantVerify.verifyInstructionSurface(projectDir: projectDir, repin: false)
+
+    // 2) Scan the untrusted content this event carries.
+    let (label, text) = hookContent(event: event, obj: obj)
+    let findings = text.isEmpty ? [] : AssistantVerify.scanInstructionText(name: label, text)
+
+    switch AssistantVerify.hookAction(instructionPinOK: pin.ok, instructionDetail: pin.detail, contentFindings: findings) {
+    case .allow:
+        exit(0)
+    case .block(let reason):
+        // verifyInstructionSurface → applyPin already recorded the .denyForgery
+        // (alert-worthy) on the pin change, so don't double-log / double-alert here.
+        FileHandle.standardError.write(Data("hush: \(reason)\n".utf8))
+        exit(2) // blocks the tool/prompt/session; stderr is fed to the model
+    case .caution(let reason):
+        AuditLog.record(.blocked, action: "guard --hook \(event)", detail: "injection markers in \(label)")
+        let payload: [String: Any] = [
+            "hookSpecificOutput": [
+                "hookEventName": event.isEmpty ? "PreToolUse" : event,
+                "additionalContext": "hush: \(reason)",
+            ],
+        ]
+        if let out = try? JSONSerialization.data(withJSONObject: payload) { FileHandle.standardOutput.write(out) }
+        exit(0) // exit 0 so Claude Code processes the JSON (exit 2 would discard it)
+    }
+}
+
+/// The untrusted text a hook event carries, and a label naming its origin. For
+/// PreToolUse we scan the about-to-run tool input (e.g. a Bash `curl … | sh`);
+/// for PostToolUse the returned output; for UserPromptSubmit the prompt itself.
+private func hookContent(event: String, obj: [String: Any]) -> (label: String, text: String) {
+    let tool = (obj["tool_name"] as? String).map { ":\($0)" } ?? ""
+    let label = "\(event.isEmpty ? "hook" : event)\(tool)"
+    switch event {
+    case "PostToolUse": return (label, (obj["tool_output"] as? String) ?? "")
+    case "UserPromptSubmit": return (label, (obj["user_input"] as? String) ?? "")
+    case "PreToolUse":
+        if let ti = obj["tool_input"], let d = try? JSONSerialization.data(withJSONObject: ti) {
+            return (label, String(decoding: d, as: UTF8.self))
+        }
+        return (label, "")
+    default: return (label, "")
+    }
+}
+
+/// settings.json snippet that wires `hush guard --hook` into Claude Code: integrity
+/// re-check at session start and before every tool, content scan on the tools that
+/// pull in external text. Printed by `hush guard --print-hook-config`.
+let hookConfigSnippet = """
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "hush guard --hook" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "hush guard --hook" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "WebFetch,Fetch,Read", "hooks": [ { "type": "command", "command": "hush guard --hook" } ] }
+    ]
+  }
+}
+"""
 
 let help = """
 hush — .env files sealed to your Mac's Secure Enclave
@@ -778,7 +952,10 @@ usage:
                                  your AI tool requests secrets through it instead
                                  of reading .env — each request is Touch ID + logged
   hush verify-assistant [name]   check an AI tool's signature/Gatekeeper, pin it
-            [--all] [--repin]    (trust-on-first-use), and scan config for injection
+            [--all] [--repin]    (trust-on-first-use), and scan config + the repo's
+                                 instruction surface (CLAUDE.md/agents/rules) for injection
+  hush guard [--repin]           run those checks, then launch the command only if
+            [--force] -- cmd     nothing is tampered/flagged (e.g. hush guard -- claude)
   hush fingerprint [--repin]     show/verify your identity fingerprint
   hush log [-n N]                show the access log (every decrypt attempt)
   hush doctor                    audit for leftover plaintext, git leaks, exposure
@@ -812,6 +989,7 @@ case "reconfig": cmdReconfig(args: Array(argv.dropFirst()))
 case "mcp": MCP.serve(args: Array(argv.dropFirst()))
 case "decoy": cmdDecoy(args: Array(argv.dropFirst()))
 case "verify-assistant", "verify": cmdVerifyAssistant(args: Array(argv.dropFirst()))
+case "guard": cmdGuard(args: Array(argv.dropFirst()))
 case "log": cmdLog(args: Array(argv.dropFirst()))
 case "fingerprint", "fp": cmdFingerprint(args: Array(argv.dropFirst()))
 case "help", "-h", "--help", nil: print(help)
