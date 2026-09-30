@@ -1,0 +1,16 @@
+{
+  "project": {
+    "id": "3f594407-aec5-4ab7-9d7b-9e4ebe5822f0",
+    "name": "Engineering",
+    "organization_id": "88dd0f5c-c288-4384-9dc6-9713281ad1ed",
+    "environment": "dev"
+  },
+  "install": {
+    "hook_manager": "git",
+    "hooks": [
+      "prepare-commit-msg",
+      "post-commit"
+    ],
+    "installed_at": "2026-09-30T19:04:40.977915917Z"
+  }
+}
